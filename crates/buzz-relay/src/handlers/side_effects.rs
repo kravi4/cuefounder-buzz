@@ -1776,6 +1776,17 @@ impl PutUserReport {
     }
 }
 
+/// Whether a re-add left a member's role unchanged. `member` and `bot` are
+/// one role: both labels are computed from the agent owner record, and the
+/// first owner record can commit between the prior-role read and the write,
+/// so the same row can read `member` and then `bot`.
+fn member_role_unchanged(prior: &str, current: &str) -> bool {
+    match (prior.parse::<MemberRole>(), current.parse::<MemberRole>()) {
+        (Ok(prior), Ok(current)) => prior.is_same_role(current),
+        _ => prior == current,
+    }
+}
+
 /// Store a validated kind:9000 and apply it, returning the stored event,
 /// whether it was new, and its OK message.
 ///
@@ -1876,7 +1887,9 @@ pub(crate) async fn persist_put_user(
             // A no-op re-add posts no second "joined" notice, but still sends
             // the member-added notification, which re-signals an agent that
             // missed the first one.
-            Some(prior) if prior == put.member.role => report.already_member.push(target_hex),
+            Some(prior) if member_role_unchanged(&prior, &put.member.role) => {
+                report.already_member.push(target_hex)
+            }
             prior => {
                 if let Err(e) = emit_system_message(
                     tenant,
@@ -4310,6 +4323,27 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mutation: compare the labels exactly → `member` then `bot` is
+    /// reported as a change → RED.
+    #[test]
+    fn re_add_treats_member_and_bot_as_one_role() {
+        assert!(member_role_unchanged("member", "bot"));
+        assert!(member_role_unchanged("bot", "member"));
+        assert!(member_role_unchanged("admin", "admin"));
+        for (prior, current) in [
+            ("guest", "member"),
+            ("guest", "bot"),
+            ("member", "admin"),
+            ("bot", "owner"),
+            ("admin", "member"),
+        ] {
+            assert!(
+                !member_role_unchanged(prior, current),
+                "{prior} -> {current}"
+            );
+        }
+    }
 
     fn create_with(creator: &nostr::Keys, tags: Vec<Vec<String>>) -> Event {
         nostr::EventBuilder::new(nostr::Kind::Custom(9007), "")

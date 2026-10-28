@@ -350,9 +350,10 @@ pub fn decide_member_put(put: MemberPut<'_>) -> Result<MemberRole, MemberPutDeni
     // `member` and `bot` are one role: the relay stores `member` and shows
     // `bot` when the target has a recorded agent owner, so asking for the
     // other one is not a role change.
-    if current.parse::<MemberRole>().is_ok_and(|current| {
-        current == requested || (current.is_ordinary_member() && requested.is_ordinary_member())
-    }) {
+    if current
+        .parse::<MemberRole>()
+        .is_ok_and(|current| current.is_same_role(requested))
+    {
         return Ok(requested);
     }
     // A stored role this build does not know is changed only by an elevated
@@ -485,6 +486,12 @@ impl MemberRole {
     /// recorded agent owner.
     pub fn is_ordinary_member(&self) -> bool {
         matches!(self, Self::Member | Self::Bot)
+    }
+
+    /// Whether `self` and `other` are the same role: equal, or both ordinary.
+    /// `member` and `bot` are one role shown with two labels.
+    pub fn is_same_role(self, other: MemberRole) -> bool {
+        self == other || (self.is_ordinary_member() && other.is_ordinary_member())
     }
 
     /// Whether this role may write in a channel: post, react, edit, change
