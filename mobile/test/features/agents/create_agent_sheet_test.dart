@@ -1,4 +1,3 @@
-import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'dart:async';
 
 import 'package:buzz/features/agents/agents_sheet.dart';
@@ -106,6 +105,5 @@ void main() {
       expect(find.byKey(ValueKey(added)), findsOneWidget);
       expect(h.registry.calls, contains('publish-policy'));
     },
-    skip: !HostedEnvironment.enabled,
   );
 }

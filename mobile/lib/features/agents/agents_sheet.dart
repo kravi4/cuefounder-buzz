@@ -150,10 +150,12 @@ class AgentsSheet extends HookConsumerWidget {
     // Key on the agents' identities, not the list instance: each refresh
     // replaces the list, and refetching would blank the shown agents.
     final registeredKey = (registeredKeys.toList()..sort()).join(',');
+    // Bumped by Retry and pull-to-refresh so a failed lookup runs again.
+    final attempt = useState(0);
     final registryFuture = useMemoized(() async {
       final fetch = ref.read(relaySessionProvider.notifier).fetchHistory;
       return ownedCommunityAgents(registeredKeys, controller.owner, fetch);
-    }, [community?.relayUrl, registeredKey, controller.owner]);
+    }, [community?.relayUrl, registeredKey, controller.owner, attempt.value]);
     final registered = useFuture(registryFuture, preserveState: false);
     final keys = {
       ...?registered.data,
@@ -202,7 +204,9 @@ class AgentsSheet extends HookConsumerWidget {
 
     Future<void> refresh() async {
       await controller.run(controller.refresh);
-      if (context.mounted) ref.invalidate(agentDirectoryProvider);
+      if (!context.mounted) return;
+      attempt.value++;
+      ref.invalidate(agentDirectoryProvider);
     }
 
     return SizedBox(

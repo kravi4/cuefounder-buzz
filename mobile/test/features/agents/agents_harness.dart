@@ -20,6 +20,9 @@ import '../../helpers/remote_agents_fixture.dart';
 
 /// Fakes the relay boundary: owner-attested profiles for registry agents.
 class _Relay extends RelaySessionNotifier {
+  _Relay(this.harness);
+  final AgentsHarness harness;
+
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
@@ -27,10 +30,20 @@ class _Relay extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => [
-    if (filter.authors?.contains(fakeAgent) ?? false)
-      signedAgentProfile(fakeAgentKeys, fakeOwner, content: '{"name":"Scout"}'),
-  ];
+  }) async {
+    final agent = filter.authors?.contains(fakeAgent) ?? false;
+    if (agent && harness.relayDown) {
+      throw TimeoutException('relay unavailable');
+    }
+    return [
+      if (agent)
+        signedAgentProfile(
+          fakeAgentKeys,
+          fakeOwner,
+          content: '{"name":"Scout"}',
+        ),
+    ];
+  }
 }
 
 /// Holds creation open so a test can observe the in-flight state.
@@ -78,6 +91,9 @@ class AgentsHarness {
   final GatedController controller;
   final Community community;
 
+  /// Fails agent profile fetches until the relay recovers.
+  bool relayDown = false;
+
   static Future<AgentsHarness> create() async {
     FlutterSecureStorage.setMockInitialValues({});
     SharedPreferences.setMockInitialValues({});
@@ -113,7 +129,7 @@ class AgentsHarness {
         overrides: [
           builderlabAccountProvider.overrideWithValue(registry),
           remoteAgentControllerProvider.overrideWithValue(controller),
-          relaySessionProvider.overrideWith(_Relay.new),
+          relaySessionProvider.overrideWith(() => _Relay(this)),
           activeCommunityProvider.overrideWith((ref) async => community),
           agentDirectoryProvider.overrideWith(
             (ref) async => [
