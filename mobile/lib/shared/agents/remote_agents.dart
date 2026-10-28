@@ -44,7 +44,7 @@ final builderlabSignedInProvider = Provider<bool>((ref) {
 final remoteAgentsEnabledProvider = Provider<bool>(
   (ref) =>
       ref.watch(builderlabSignedInProvider) &&
-      supportsRemoteAgents(ref.watch(activeCommunityProvider).asData?.value),
+      supportsRemoteAgents(ref.watch(activeCommunityProvider).value),
 );
 
 final remoteAgentControllerProvider = Provider<RemoteAgentController>((ref) {

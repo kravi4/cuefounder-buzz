@@ -101,6 +101,13 @@ void main() {
       container.read(remoteAgentsEnabledProvider),
       HostedEnvironment.enabled,
     );
+    // A community refresh keeps the surfaces open on the previous value.
+    container.invalidate(activeCommunityProvider);
+    expect(container.read(activeCommunityProvider).isLoading, isTrue);
+    expect(
+      container.read(remoteAgentsEnabledProvider),
+      HostedEnvironment.enabled,
+    );
     registry.signedIn = false;
     expect(container.read(remoteAgentsEnabledProvider), isFalse);
   });
