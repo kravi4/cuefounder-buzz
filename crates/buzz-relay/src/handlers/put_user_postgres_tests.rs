@@ -249,6 +249,140 @@ async fn put_user_reports_role_changes_as_updated() {
     );
 }
 
+/// `member` and `bot` are one role. The label is computed from the agent
+/// owner record, which does not take the membership lock, so an owner record
+/// can commit after `put_members` reads the prior roles and before its write
+/// returns the new ones. A re-add of that agent then reads `member` before
+/// and `bot` after, and is still reported as `already_member` with no second
+/// joined notice. Real role changes in the same event are still `updated`.
+///
+/// The test holds a SHARE lock on `channel_members`: the prior-role read
+/// passes it and the write waits for it before its statement snapshot. The
+/// owner record commits while the write waits.
+/// Mutation: compare the labels exactly in `persist_put_user` → the agent is
+/// `updated` and gets a second joined notice → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn put_user_re_add_racing_the_first_owner_record_is_already_member() {
+    let state = state().await;
+    let tenant = community(&state, "put-user-owner-race").await;
+    let (owner, agent, agent_owner, admin, guest) = (
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+    );
+    let (agent_hex, admin_hex, guest_hex) = (
+        agent.public_key().to_hex(),
+        admin.public_key().to_hex(),
+        guest.public_key().to_hex(),
+    );
+    let channel_id = create_channel(&state, &tenant, &owner, &[&["p", &agent_hex]]).await;
+    let setup = ingest(
+        &state,
+        &tenant,
+        put_user(
+            &owner,
+            channel_id,
+            &[&[&admin_hex, "admin"], &[&guest_hex, "guest"]],
+            &[],
+        ),
+        &owner,
+    )
+    .await
+    .expect("set up admin and guest");
+    assert!(setup.accepted, "{}", setup.message);
+    for key in [&agent, &agent_owner] {
+        state
+            .db
+            .ensure_user(tenant.community(), &key.public_key().to_bytes())
+            .await
+            .expect("ensure user");
+    }
+
+    let mut lock = state.db.pool().begin().await.expect("begin lock");
+    sqlx::query("LOCK TABLE channel_members IN SHARE MODE")
+        .execute(&mut *lock)
+        .await
+        .expect("lock channel_members");
+    let re_add = tokio::spawn({
+        let (state, tenant, owner) = (Arc::clone(&state), tenant.clone(), owner.clone());
+        let event = put_user(
+            &owner,
+            channel_id,
+            &[
+                &[&agent_hex],
+                &[&admin_hex, "member"],
+                &[&guest_hex, "member"],
+            ],
+            &[],
+        );
+        async move { ingest(&state, &tenant, event, &owner).await }
+    });
+
+    // Wait until the transaction that holds this channel's membership lock
+    // (`acquire_channel_membership_lock`) is waiting to write
+    // `channel_members`: its prior-role read has run.
+    let lock_name = format!(
+        "buzz_channel_membership:{}:{channel_id}",
+        tenant.community().as_uuid()
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS ( \
+                   SELECT 1 FROM pg_locks held \
+                   JOIN pg_locks waiting ON waiting.pid = held.pid \
+                   WHERE held.locktype = 'advisory' AND held.granted AND held.objsubid = 1 \
+                     AND held.classid::bigint = (k.key >> 32) & 4294967295 \
+                     AND held.objid::bigint = k.key & 4294967295 \
+                     AND waiting.locktype = 'relation' AND NOT waiting.granted \
+                     AND waiting.relation = 'channel_members'::regclass \
+                 ) FROM (SELECT hashtextextended($1, 0) AS key) k",
+            )
+            .bind(&lock_name)
+            .fetch_one(state.db.pool())
+            .await
+            .expect("inspect the membership write");
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the membership write reached the table lock");
+
+    assert!(state
+        .db
+        .set_agent_owner(
+            tenant.community(),
+            &agent.public_key().to_bytes(),
+            &agent_owner.public_key().to_bytes(),
+        )
+        .await
+        .expect("record owner"));
+    lock.rollback().await.expect("release lock");
+
+    let result = re_add.await.expect("join re-add").expect("re-add");
+    assert!(result.accepted, "{}", result.message);
+    assert_eq!(
+        report(&result.message),
+        serde_json::json!({
+            "updated": [admin_hex, guest_hex],
+            "already_member": [agent_hex],
+        })
+    );
+    assert_eq!(
+        role_of(&state, &tenant, channel_id, &agent)
+            .await
+            .as_deref(),
+        Some("bot")
+    );
+    assert_eq!(joined_notices(&state, &tenant, channel_id, &agent).await, 1);
+}
+
 /// When nobody named may be added the event is refused: one person keeps the
 /// single-add error, several get the grouped report. A malformed `p` refuses
 /// the whole event.
