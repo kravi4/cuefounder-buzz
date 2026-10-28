@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
+import '../../shared/widgets/agent_navigation_overlay.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/theme/buzz_icons.dart';
@@ -10,7 +12,7 @@ import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/ios_message_create_button.dart';
 
 /// Separate glass shortcuts for search and creation.
-class MessagesNavigationBar extends StatelessWidget {
+class MessagesNavigationBar extends HookWidget {
   const MessagesNavigationBar({
     super.key,
     required this.onSearch,
@@ -23,76 +25,103 @@ class MessagesNavigationBar extends StatelessWidget {
   creationActions;
 
   @override
-  Widget build(BuildContext context) => Row(
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      ConcentricSheetSurface(
-        enabled: true,
-        usesGlass: true,
-        providesSheetSurface: false,
-        padding: EdgeInsets.zero,
-        minimumRadius: Radii.navigationCapsule,
-        contentClipRadius: Radii.navigationCapsule,
-        child: SizedBox.square(
-          dimension: 56,
-          child: IconButton(
-            tooltip: 'Search',
-            onPressed: () {
-              unawaited(HapticFeedback.lightImpact());
-              onSearch();
-            },
-            color: context.colors.onSurface,
-            icon: const Icon(BuzzIcons.search300, size: 24),
-          ),
-        ),
-      ),
-      const SizedBox(width: Grid.xs),
-      if (defaultTargetPlatform == TargetPlatform.iOS)
-        IosMessageCreateButton(
-          actions: creationActions,
-          label: 'New',
-          showIconWithLabel: true,
-          accessibilityLabel: 'New',
-          width: 112,
-          height: 56,
-          plain: false,
-        )
-      else
-        ConcentricSheetSurface(
-          enabled: true,
-          usesGlass: true,
-          providesSheetSurface: false,
-          padding: EdgeInsets.zero,
-          minimumRadius: Radii.navigationCapsule,
-          contentClipRadius: Radii.navigationCapsule,
-          child: PopupMenuButton<int>(
-            tooltip: 'New',
-            onOpened: () => unawaited(HapticFeedback.lightImpact()),
-            onSelected: (index) => creationActions[index].onPressed?.call(),
-            itemBuilder: (_) => [
-              for (var i = 0; i < creationActions.length; i++)
-                PopupMenuItem(
-                  value: i,
-                  enabled: creationActions[i].onPressed != null,
-                  child: Text(creationActions[i].label),
+  Widget build(BuildContext context) {
+    final overlay = useState(false);
+    return AgentNavigationOverlay(
+      active: overlay,
+      child: SizedBox(
+        width: 224 + Grid.xs * 2,
+        height: 56,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            ExcludeSemantics(
+              excluding: overlay.value,
+              child: IgnorePointer(
+                ignoring: overlay.value,
+                child: Opacity(
+                  opacity: overlay.value ? 0 : 1,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ConcentricSheetSurface(
+                        enabled: true,
+                        usesGlass: true,
+                        providesSheetSurface: false,
+                        padding: EdgeInsets.zero,
+                        minimumRadius: Radii.navigationCapsule,
+                        contentClipRadius: Radii.navigationCapsule,
+                        child: SizedBox.square(
+                          dimension: 56,
+                          child: IconButton(
+                            tooltip: 'Search',
+                            onPressed: () {
+                              unawaited(HapticFeedback.lightImpact());
+                              onSearch();
+                            },
+                            color: context.colors.onSurface,
+                            icon: const Icon(BuzzIcons.search300, size: 24),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: Grid.xs),
+                      if (defaultTargetPlatform == TargetPlatform.iOS)
+                        IosMessageCreateButton(
+                          actions: creationActions,
+                          label: 'New',
+                          showIconWithLabel: true,
+                          accessibilityLabel: 'New',
+                          width: 112,
+                          height: 56,
+                          plain: false,
+                        )
+                      else
+                        ConcentricSheetSurface(
+                          enabled: true,
+                          usesGlass: true,
+                          providesSheetSurface: false,
+                          padding: EdgeInsets.zero,
+                          minimumRadius: Radii.navigationCapsule,
+                          contentClipRadius: Radii.navigationCapsule,
+                          child: PopupMenuButton<int>(
+                            tooltip: 'New',
+                            onOpened: () =>
+                                unawaited(HapticFeedback.lightImpact()),
+                            onSelected: (index) =>
+                                creationActions[index].onPressed?.call(),
+                            itemBuilder: (_) => [
+                              for (var i = 0; i < creationActions.length; i++)
+                                PopupMenuItem(
+                                  value: i,
+                                  enabled: creationActions[i].onPressed != null,
+                                  child: Text(creationActions[i].label),
+                                ),
+                            ],
+                            child: const SizedBox(
+                              width: 112,
+                              height: 56,
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(BuzzIcons.plus, size: 24),
+                                  SizedBox(width: Grid.xxs),
+                                  Text('New'),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      const SizedBox(width: Grid.xs),
+                      const SizedBox.square(dimension: 56),
+                    ],
+                  ),
                 ),
-            ],
-            child: const SizedBox(
-              width: 112,
-              height: 56,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(BuzzIcons.plus, size: 24),
-                  SizedBox(width: Grid.xxs),
-                  Text('New'),
-                ],
               ),
             ),
-          ),
+            Positioned(right: 0, top: 0, child: agent),
+          ],
         ),
-      const SizedBox(width: Grid.xs),
-      agent,
-    ],
-  );
+      ),
+    );
+  }
 }
