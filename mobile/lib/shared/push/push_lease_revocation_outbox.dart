@@ -334,8 +334,9 @@ class BuzzPushLeaseRevocationOutbox {
         (!community.pushNotificationsEnabled &&
             state.pendingTombstoneGeneration == null)) {
       if (!Env.pushGatewayConfigured ||
-          defaultTargetPlatform != TargetPlatform.iOS)
+          defaultTargetPlatform != TargetPlatform.iOS) {
         return false;
+      }
       // Journal cancellation even before native enrollment has saved its first
       // record. The shared native lane cannot acknowledge while it is in flight.
       final relayOrigin = canonicalBuzzPushRelayOrigin(community.relayUrl);
@@ -425,8 +426,9 @@ class BuzzPushLeaseRevocationOutbox {
     final grants = await (readGrants ?? readBuzzPushEndpointGrants)();
     for (final grant in grants) {
       final target = grant.gatewayRevocationTarget;
-      if (target == null || (!grant.pending && grant.endpointGrant.isEmpty))
+      if (target == null || (!grant.pending && grant.endpointGrant.isEmpty)) {
         continue;
+      }
       final shared = communities.any(
         (community) =>
             community.pushNotificationsEnabled &&
@@ -660,8 +662,9 @@ Future<void> publishBuzzPushLeaseRevocation(
     await revokeBuzzPushDelegation(target);
   }
   if (record.gatewayOnly ||
-      record.expiresAt <= DateTime.now().millisecondsSinceEpoch ~/ 1000)
+      record.expiresAt <= DateTime.now().millisecondsSinceEpoch ~/ 1000) {
     return;
+  }
   final descriptor = await fetchBuzzPushLeaseDescriptor(record.relayUrl);
   if (descriptor.origin != record.relayOrigin) {
     throw StateError('Relay push origin changed while revocation was pending.');

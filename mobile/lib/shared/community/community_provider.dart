@@ -636,8 +636,9 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         if (pending.isEmpty ||
             pending.single.pushNotificationsEnabled ||
             pending.single.pushSubscriptionState.pendingTombstoneGeneration !=
-                generation)
+                generation) {
           return;
+        }
         final shared = current.any(
           (other) =>
               other.id != id &&
