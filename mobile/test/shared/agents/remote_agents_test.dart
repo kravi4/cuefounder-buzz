@@ -7,6 +7,7 @@ import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/crypto/nip_oa.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -23,6 +24,18 @@ final _scope = 'remote-agents:${HostedEnvironment.origin.host}:$fakeSubject';
 
 /// Deterministic test keys.
 nostr.Keys _keys(String last) => nostr.Keys('0' * 63 + last);
+
+/// Starts signed out, like a cold start, until its saved session is restored.
+class _RestoringRegistry extends FakeRegistry {
+  _RestoringRegistry() : super(signedIn: false);
+
+  @override
+  Future<BuilderlabAccount?> restore() async {
+    await Future<void>.delayed(Duration.zero);
+    signedIn = true;
+    return account;
+  }
+}
 
 Community _community({String? pubkey}) => Community.create(
   name: 'Test',
@@ -102,7 +115,7 @@ void main() {
       HostedEnvironment.enabled,
     );
     // A community refresh keeps the surfaces open on the previous value.
-    container.invalidate(activeCommunityProvider);
+    container.invalidate(activeCommunityProvider, asReload: true);
     expect(container.read(activeCommunityProvider).isLoading, isTrue);
     expect(
       container.read(remoteAgentsEnabledProvider),
@@ -110,6 +123,22 @@ void main() {
     );
     registry.signedIn = false;
     expect(container.read(remoteAgentsEnabledProvider), isFalse);
+  });
+
+  test('a saved Builderlab session is restored on cold start', () async {
+    final registry = _RestoringRegistry();
+    addTearDown(registry.dispose);
+    final container = ProviderContainer(
+      overrides: [builderlabAccountProvider.overrideWithValue(registry)],
+    );
+    addTearDown(container.dispose);
+    expect(container.read(builderlabSignedInProvider), isFalse);
+    // Nothing else restores the account; the gate itself must.
+    await Future<void>.delayed(Duration.zero);
+    expect(
+      container.read(builderlabSignedInProvider),
+      HostedEnvironment.enabled,
+    );
   });
 
   test('a failed listing is reported instead of an empty registry', () async {

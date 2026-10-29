@@ -30,8 +30,19 @@ bool supportsRemoteAgents(Community? community) =>
     community.pubkey != null &&
     HostedEnvironment.supportsRelay(Uri.parse(community.relayUrl));
 
+/// Restores a saved Builderlab session once, so a cold start with a stored
+/// session shows remote agents without waiting for another sign-in path.
+final builderlabRestoreProvider = FutureProvider<void>((ref) async {
+  try {
+    await ref.watch(builderlabAccountProvider).restore();
+  } on Object {
+    // Unreachable or rejected sessions stay signed out; sign-in recovers them.
+  }
+});
+
 /// Whether a Builderlab account is signed in, updating on sign-in and out.
 final builderlabSignedInProvider = Provider<bool>((ref) {
+  if (HostedEnvironment.enabled) ref.watch(builderlabRestoreProvider);
   final subject = ref.watch(builderlabAccountProvider).subjectChanges;
   void changed() => ref.invalidateSelf();
   subject.addListener(changed);

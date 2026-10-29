@@ -157,8 +157,15 @@ class AgentsSheet extends HookConsumerWidget {
       return ownedCommunityAgents(registeredKeys, controller.owner, fetch);
     }, [community?.relayUrl, registeredKey, controller.owner, attempt.value]);
     final registered = useFuture(registryFuture, preserveState: false);
+    // A refresh keeps showing the last owned agents for the same registry.
+    final scope = '${community?.relayUrl}|$registeredKey|${controller.owner}';
+    final lastOwned = useRef<(String, Set<String>)?>(null);
+    if (registered.data case final owned?) lastOwned.value = (scope, owned);
+    final owned =
+        registered.data ??
+        (lastOwned.value?.$1 == scope ? lastOwned.value?.$2 : null);
     final keys = {
-      ...?registered.data,
+      ...?owned,
       for (final entry in directory.asData?.value ?? <AgentDirectoryEntry>[])
         entry.pubkey,
     }.where((key) => !controller.deletedAgents.contains(key)).toList();
