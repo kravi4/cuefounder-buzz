@@ -243,87 +243,91 @@ mod tests {
         assert!(ring(&[("new", 3)]).open(&new_ciphertext).is_err());
     }
 
-    #[tokio::test]
-    #[ignore = "requires PostgreSQL"]
-    async fn storage_rotation_preserves_endpoint_changes_and_guards_retirement() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&std::env::var("BUZZ_TEST_DATABASE_URL").expect("test database URL"))
-            .await
-            .unwrap();
-        let schema = format!("token_rotation_{}", uuid::Uuid::new_v4().simple());
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-            "CREATE SCHEMA {schema}; SET search_path TO {schema}"
-        )))
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::raw_sql(include_str!(
-            "../../../schema/tables/public/push_gateway_installations.sql"
-        ))
-        .execute(&pool)
-        .await
-        .unwrap();
-        let id = uuid::Uuid::new_v4();
-        let old = ring(&[("old", 1)]);
-        let rotated = ring(&[("new", 2), ("old", 1)]);
-        let retired = ring(&[("new", 2)]);
-        let ciphertext = old.seal(&[7; 32]).unwrap();
-        // Retained revoked rows need reader keys too; lifetime is irrelevant.
-        sqlx::query("INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at,revoked_at) VALUES($1,$2,$3,0,$4,$5,1,now()-interval '1 day',now())")
-            .bind(id).bind(vec![1_u8]).bind(vec![2_u8;33]).bind(&ciphertext).bind(vec![3_u8;32])
-            .execute(&pool).await.unwrap();
-        assert!(retired.audit_storage(&pool).await.is_err());
-        assert_eq!(rotated.audit_storage(&pool).await.unwrap(), 1);
-        assert!(ring(&[("old", 9)]).audit_storage(&pool).await.is_err());
-        let replacement = rotated.seal(&[8; 32]).unwrap();
-        // Endpoint rotation wins over maintenance's previously read snapshot.
-        sqlx::query("UPDATE push_gateway_installations SET token_ciphertext=$1,endpoint_epoch=2,token_fingerprint=$2 WHERE id=$3")
-            .bind(&replacement).bind(vec![4_u8;32]).bind(id).execute(&pool).await.unwrap();
-        assert_eq!(
-            replace_ciphertext(
-                &pool,
-                id,
-                &ciphertext,
-                1,
-                &[3; 32],
-                &rotated.seal(&[7; 32]).unwrap()
-            )
-            .await
-            .unwrap(),
-            0
-        );
-        let stored: Vec<u8> = sqlx::query_scalar(
-            "SELECT token_ciphertext FROM push_gateway_installations WHERE id=$1",
-        )
-        .bind(id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(stored, replacement);
-        // A remaining old ciphertext is rewritten by the production workflow.
-        sqlx::query("UPDATE push_gateway_installations SET token_ciphertext=$1 WHERE id=$2")
-            .bind(old.seal(&[8; 32]).unwrap())
-            .bind(id)
+    mod postgres_tests {
+        use super::*;
+
+        #[tokio::test]
+        #[ignore = "requires PostgreSQL"]
+        async fn storage_rotation_preserves_endpoint_changes_and_guards_retirement() {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&std::env::var("BUZZ_TEST_DATABASE_URL").expect("test database URL"))
+                .await
+                .unwrap();
+            let schema = format!("token_rotation_{}", uuid::Uuid::new_v4().simple());
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "CREATE SCHEMA {schema}; SET search_path TO {schema}"
+            )))
             .execute(&pool)
             .await
             .unwrap();
-        rotated.reencrypt_storage(&pool).await.unwrap();
-        assert_eq!(retired.audit_storage(&pool).await.unwrap(), 0);
-        let stored: Vec<u8> = sqlx::query_scalar(
-            "SELECT token_ciphertext FROM push_gateway_installations WHERE id=$1",
-        )
-        .bind(id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(retired.open(&stored).unwrap(), [8; 32]);
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-            "SET search_path TO public; DROP SCHEMA {schema} CASCADE"
-        )))
-        .execute(&pool)
-        .await
-        .unwrap();
-        pool.close().await;
+            sqlx::raw_sql(include_str!(
+                "../../../schema/tables/public/push_gateway_installations.sql"
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
+            let id = uuid::Uuid::new_v4();
+            let old = ring(&[("old", 1)]);
+            let rotated = ring(&[("new", 2), ("old", 1)]);
+            let retired = ring(&[("new", 2)]);
+            let ciphertext = old.seal(&[7; 32]).unwrap();
+            // Retained revoked rows need reader keys too; lifetime is irrelevant.
+            sqlx::query("INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at,revoked_at) VALUES($1,$2,$3,0,$4,$5,1,now()-interval '1 day',now())")
+                .bind(id).bind(vec![1_u8]).bind(vec![2_u8;33]).bind(&ciphertext).bind(vec![3_u8;32])
+                .execute(&pool).await.unwrap();
+            assert!(retired.audit_storage(&pool).await.is_err());
+            assert_eq!(rotated.audit_storage(&pool).await.unwrap(), 1);
+            assert!(ring(&[("old", 9)]).audit_storage(&pool).await.is_err());
+            let replacement = rotated.seal(&[8; 32]).unwrap();
+            // Endpoint rotation wins over maintenance's previously read snapshot.
+            sqlx::query("UPDATE push_gateway_installations SET token_ciphertext=$1,endpoint_epoch=2,token_fingerprint=$2 WHERE id=$3")
+                .bind(&replacement).bind(vec![4_u8;32]).bind(id).execute(&pool).await.unwrap();
+            assert_eq!(
+                replace_ciphertext(
+                    &pool,
+                    id,
+                    &ciphertext,
+                    1,
+                    &[3; 32],
+                    &rotated.seal(&[7; 32]).unwrap()
+                )
+                .await
+                .unwrap(),
+                0
+            );
+            let stored: Vec<u8> = sqlx::query_scalar(
+                "SELECT token_ciphertext FROM push_gateway_installations WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(stored, replacement);
+            // A remaining old ciphertext is rewritten by the production workflow.
+            sqlx::query("UPDATE push_gateway_installations SET token_ciphertext=$1 WHERE id=$2")
+                .bind(old.seal(&[8; 32]).unwrap())
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            rotated.reencrypt_storage(&pool).await.unwrap();
+            assert_eq!(retired.audit_storage(&pool).await.unwrap(), 0);
+            let stored: Vec<u8> = sqlx::query_scalar(
+                "SELECT token_ciphertext FROM push_gateway_installations WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(retired.open(&stored).unwrap(), [8; 32]);
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "SET search_path TO public; DROP SCHEMA {schema} CASCADE"
+            )))
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
     }
 }

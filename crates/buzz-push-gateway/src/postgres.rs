@@ -774,9 +774,7 @@ impl AuthorityStore for PostgresAuthorityStore {
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
-    mod protocol_tests {
-        include!("postgres/protocol_tests.rs");
-    }
+    include!("postgres/protocol_tests.rs");
     use sqlx::{postgres::PgPoolOptions, AssertSqlSafe};
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- fixed localhost-only test credential
