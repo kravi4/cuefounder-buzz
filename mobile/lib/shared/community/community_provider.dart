@@ -647,7 +647,11 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
                 (candidate) =>
                     candidate.relayOrigin ==
                         canonicalBuzzPushRelayOrigin(other.relayUrl) &&
-                    candidate.relayPubkey == grant.relayPubkey,
+                    candidate.relayPubkey == grant.relayPubkey &&
+                    (grant.pending
+                        ? candidate.relayOrigin == grant.relayOrigin
+                        : candidate.gatewayInstallationHandle ==
+                              grant.gatewayInstallationHandle),
               ),
         );
         if (!shared && target != null) await revokeBuzzPushDelegation(target);

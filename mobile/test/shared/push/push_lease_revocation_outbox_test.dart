@@ -43,9 +43,14 @@ void main() {
       pushLeaseCleanupError.value = null;
     });
 
-    for (final siblingSigner in [null, 'c' * 64, 'a' * 64]) {
+    for (final (siblingSigner, differentInstallation) in [
+      (null, false),
+      ('c' * 64, false),
+      ('a' * 64, false),
+      ('a' * 64, true),
+    ]) {
       test(
-        'only a known shared signer retains gateway authority: $siblingSigner',
+        'only a shared installation/signer retains authority: $siblingSigner/$differentInstallation',
         () async {
           final sibling = Community.create(
             name: 'Unrelated or shared',
@@ -68,6 +73,10 @@ void main() {
                 endpointEpoch: 1,
                 generation: 1,
                 expiresAt: grant.expiresAt,
+                gatewayInstallationHandle: differentInstallation
+                    ? '44444444-4444-4444-8444-444444444444'
+                    : grant.gatewayInstallationHandle,
+                appAttestKeyId: grant.appAttestKeyId,
               ),
           ];
           final revoked = <Object?>[];
@@ -85,6 +94,9 @@ void main() {
             overrides: [
               communityStorageProvider.overrideWithValue(communities),
               communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+              communityPushLeaseDeactivatorProvider.overrideWithValue(
+                (_, {generation}) async {},
+              ),
               buzzPushLeaseRevocationStorageProvider.overrideWithValue(storage),
             ],
           );
@@ -100,11 +112,46 @@ void main() {
           await outbox.trigger();
           expect(
             revoked,
-            siblingSigner == grant.relayPubkey
+            siblingSigner == grant.relayPubkey && !differentInstallation
                 ? isEmpty
                 : [grant.gatewayRevocationTarget],
           );
           expect(await storage.loadAll(), isEmpty);
+          final shared =
+              siblingSigner == grant.relayPubkey && !differentInstallation;
+          await outbox.reconcileGatewayCleanup([
+            sibling,
+          ], readGrants: () async => grants);
+          expect(await storage.loadAll(), hasLength(shared ? 0 : 1));
+          await storage.replaceAll([]);
+          final removed =
+              Community.create(
+                name: 'Removed',
+                relayUrl: grant.relayOrigin,
+                nsec: keys.nsec,
+              ).copyWith(
+                pushSubscriptionState:
+                    const BuzzPushLeaseSubscriptionState.desired()
+                        .withReservedGeneration(4),
+              );
+          await outbox.enqueueCommunity(
+            removed,
+            readGrants: () async => grants,
+            remainingCommunities: [sibling],
+          );
+          expect(
+            (await storage.loadAll()).single.gatewayRevocation,
+            shared ? isNull : grant.gatewayRevocationTarget,
+          );
+          await storage.replaceAll([]);
+          await communities.save(removed);
+          container.invalidate(communityListProvider);
+          await container.read(communityListProvider.future);
+          revoked.clear();
+          await container
+              .read(communityListProvider.notifier)
+              .setPushNotificationsEnabled(removed.id, false);
+          expect(revoked, shared ? isEmpty : [grant.gatewayRevocationTarget]);
         },
       );
     }

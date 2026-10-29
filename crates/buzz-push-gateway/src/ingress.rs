@@ -46,7 +46,7 @@ impl Lane {
         let source = request
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
-            .map(|v| v.0.ip());
+            .map(|v| v.0.ip().to_canonical());
         #[cfg(test)]
         let source = source.or(Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)));
         let Some(source) = source else {
@@ -163,6 +163,8 @@ mod tests {
         for (peer, client) in [
             ("10.0.0.2:123", "192.0.2.1"),
             ("10.0.0.2:123", "192.0.2.2"),
+            ("[::ffff:10.0.0.2]:123", "192.0.2.3"),
+            ("[::ffff:10.0.0.2]:123", "192.0.2.4"),
             ("[2001:db8::1]:123", "2001:db8:1::1"),
         ] {
             assert_eq!(

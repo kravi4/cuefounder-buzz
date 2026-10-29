@@ -392,7 +392,11 @@ class BuzzPushLeaseRevocationOutbox {
             (candidate) =>
                 candidate.relayOrigin ==
                     canonicalBuzzPushRelayOrigin(other.relayUrl) &&
-                candidate.relayPubkey == grant.relayPubkey,
+                candidate.relayPubkey == grant.relayPubkey &&
+                (grant.pending
+                    ? candidate.relayOrigin == grant.relayOrigin
+                    : candidate.gatewayInstallationHandle ==
+                          grant.gatewayInstallationHandle),
           ),
     );
     if (grant.expiresAt <= currentSeconds) return false;
@@ -436,7 +440,11 @@ class BuzzPushLeaseRevocationOutbox {
               (candidate) =>
                   candidate.relayOrigin ==
                       canonicalBuzzPushRelayOrigin(community.relayUrl) &&
-                  candidate.relayPubkey == grant.relayPubkey,
+                  candidate.relayPubkey == grant.relayPubkey &&
+                  (grant.pending
+                      ? candidate.relayOrigin == grant.relayOrigin
+                      : candidate.gatewayInstallationHandle ==
+                            grant.gatewayInstallationHandle),
             ),
       );
       if (shared) continue;
@@ -719,7 +727,7 @@ final buzzPushLeaseRevocationOutboxProvider =
                 ref.read(communityListProvider).value ??
                 await ref.read(communityStorageProvider).loadAll();
             // Recheck at execution: another community may have opted in since
-            // this cleanup was journaled. Only a known signer shares authority.
+            // this cleanup was journaled. Sharing is installation-scoped.
             revokeGateway =
                 originalTarget['relayPubkey'] == '' ||
                 !communities
@@ -732,7 +740,13 @@ final buzzPushLeaseRevocationOutboxProvider =
                       );
                       return matching.any(
                         (grant) =>
-                            grant.relayPubkey == originalTarget['relayPubkey'],
+                            grant.relayPubkey ==
+                                originalTarget['relayPubkey'] &&
+                            (originalTarget.containsKey('installationHandle')
+                                ? grant.gatewayInstallationHandle ==
+                                      originalTarget['installationHandle']
+                                : grant.relayOrigin ==
+                                      originalTarget['relayOrigin']),
                       );
                     });
           }
