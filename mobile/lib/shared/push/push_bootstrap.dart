@@ -154,6 +154,47 @@ Future<int> publishBuzzPushLeaseRecoverably({
   return generation;
 }
 
+/// Restores attempted leases across enabled relay origins after token rotation.
+/// Retrying includes nonempty grants because native save precedes relay handoff.
+@visibleForTesting
+Future<int?> renewBuzzPushCommunityLeases({
+  required List<Community> Function() readCommunities,
+  required List<BuzzPushEndpointGrant> grants,
+  required Future<BuzzPushEndpointGrant> Function(Community community) publish,
+}) async {
+  Object? firstError;
+  StackTrace? firstStack;
+  int? expiresAt;
+  final origins = {for (final grant in grants) grant.relayOrigin};
+  for (final id
+      in readCommunities().map((community) => community.id).toList()) {
+    final community = readCommunities()
+        .where((value) => value.id == id)
+        .firstOrNull;
+    if (community == null ||
+        !community.pushNotificationsEnabled ||
+        community.pushSubscriptionState.desired.isEmpty ||
+        community.nsec == null ||
+        community.nsec!.isEmpty) {
+      continue;
+    }
+    try {
+      if (!origins.contains(canonicalBuzzPushRelayOrigin(community.relayUrl))) {
+        continue;
+      }
+      final grant = await publish(community);
+      if (expiresAt == null || grant.expiresAt < expiresAt) {
+        expiresAt = grant.expiresAt;
+      }
+    } catch (error, stack) {
+      firstError ??= error;
+      firstStack ??= stack;
+    }
+  }
+  if (firstError != null) Error.throwWithStackTrace(firstError, firstStack!);
+  return expiresAt;
+}
+
 typedef _PushInputs = ({
   BuzzPushLeaseRevocationOutbox revocationOutbox,
   SessionState session,
@@ -270,8 +311,13 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(apnsDeviceToken);
+    useListenable(pushEndpointGrants);
     final publicationAttempt = useMemoized(BuzzPushAttemptGate.new);
     final tombstoneAttempt = useMemoized(BuzzPushAttemptGate.new);
+    final otherOriginsAttempt = useMemoized(BuzzPushAttemptGate.new);
+    final otherOriginsBusy = useRef(false);
+    final latestOtherOriginsAttempt = useRef('');
+    final otherOriginsRetry = useState(0);
     final publicationRetry = useState(0);
     final tombstoneRetry = useState(0);
     final (
@@ -313,6 +359,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       () => () {
         publicationAttempt.dispose();
         tombstoneAttempt.dispose();
+        otherOriginsAttempt.dispose();
       },
       const [],
     );
@@ -377,6 +424,92 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     );
 
     final token = apnsDeviceToken.value;
+    final nativeCleanupKey = [
+      for (final grant in pushEndpointGrants.value)
+        '${grant.relayOrigin}|${grant.relayPubkey}|${grant.gatewayInstallationHandle}|'
+            '${grant.generation}|${grant.endpointEpoch}|${grant.endpointGrant.isEmpty}|${grant.pending}',
+    ].join(';');
+    final allOriginsKey =
+        '$token|$nativeCleanupKey|${[for (final value in communities) '${value.id}|${value.pushNotificationsEnabled}|'
+              '${buzzPushSubscriptionsFingerprint(value.pushSubscriptionState.desired)}'].join(';')}';
+    latestOtherOriginsAttempt.value = allOriginsKey;
+    useEffect(() {
+      if (!Env.pushGatewayConfigured ||
+          otherOriginsBusy.value ||
+          !otherOriginsAttempt.tryBegin(allOriginsKey)) {
+        return null;
+      }
+      otherOriginsBusy.value = true;
+      unawaited(() async {
+        var succeeded = false;
+        try {
+          if (!ref.read(communityListProvider).hasValue) {
+            throw StateError('Push community storage is still loading.');
+          }
+          final grants = await readBuzzPushEndpointGrants();
+          if (!context.mounted) return;
+          await revocationOutbox.reconcileGatewayCleanup(
+            ref.read(communityListProvider).value!,
+            readGrants: () async => grants,
+          );
+          final expiresAt = token == null
+              ? null
+              : await renewBuzzPushCommunityLeases(
+                  readCommunities: () => context.mounted
+                      ? ref.read(communityListProvider).value ?? const []
+                      : const [],
+                  grants: grants,
+                  publish: (value) {
+                    final member = value.pubkey ?? pubkeyFromNsec(value.nsec);
+                    if (member == null) {
+                      throw StateError('Push lease signing key is missing.');
+                    }
+                    return _publish(
+                      ref,
+                      RelayConfig(baseUrl: value.relayUrl, nsec: value.nsec),
+                      value,
+                      member,
+                      null,
+                    );
+                  },
+                );
+          succeeded = true;
+          if (expiresAt != null && context.mounted) {
+            final renewIn =
+                expiresAt * 1000 -
+                DateTime.now().millisecondsSinceEpoch -
+                const Duration(minutes: 5).inMilliseconds;
+            otherOriginsAttempt.retryAfter(
+              allOriginsKey,
+              delay: Duration(milliseconds: renewIn > 1000 ? renewIn : 1000),
+              retry: () {
+                if (context.mounted) otherOriginsRetry.value += 1;
+              },
+            );
+          }
+        } catch (error, stack) {
+          if (context.mounted) {
+            otherOriginsAttempt.failed(
+              allOriginsKey,
+              retry: () {
+                if (context.mounted) otherOriginsRetry.value += 1;
+              },
+            );
+          }
+          reportPushSetupError('relay lease renewal', error, stack);
+        } finally {
+          otherOriginsBusy.value = false;
+          if (succeeded &&
+              context.mounted &&
+              latestOtherOriginsAttempt.value != allOriginsKey) {
+            otherOriginsAttempt.complete(allOriginsKey);
+            otherOriginsRetry.value += 1;
+          }
+        }
+      }());
+      return null;
+    }, [allOriginsKey, otherOriginsRetry.value]);
+
     useEffect(
       () {
         if (!_ready(session, config, community, memberPubkey) ||
@@ -489,7 +622,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     RelayConfig config,
     Community community,
     String memberPubkey,
-    SignedEventRelay relay,
+    SignedEventRelay? relay,
   ) async {
     final state = community.pushSubscriptionState;
     final desired = state.desired;
@@ -497,12 +630,49 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       config.baseUrl,
     );
     validateBuzzPushChannelGrammar(descriptor, desired);
-    final grant = await enrollBuzzPush(
-      config.wsUrl,
-      Env.pushGatewayUrl,
-      communitiesForSnapshotRefresh:
-          ref.read(communityListProvider).value ?? [community],
-    );
+    bool currentIntent() {
+      if (!ref.context.mounted) return false;
+      final current = ref
+          .read(communityListProvider)
+          .value
+          ?.where((value) => value.id == community.id)
+          .firstOrNull;
+      return current != null &&
+          current.pushNotificationsEnabled &&
+          current.nsec?.trim() == config.nsec &&
+          current.relayUrl == community.relayUrl &&
+          buzzPushSubscriptionsFingerprint(
+                current.pushSubscriptionState.desired,
+              ) ==
+              buzzPushSubscriptionsFingerprint(desired);
+    }
+
+    if (!currentIntent()) throw StateError('Push setup was superseded.');
+
+    late final BuzzPushEndpointGrant grant;
+    try {
+      grant = await enrollBuzzPush(
+        config.wsUrl,
+        Env.pushGatewayUrl,
+        communitiesForSnapshotRefresh:
+            ref.read(communityListProvider).value ?? [community],
+      );
+    } catch (error, stack) {
+      try {
+        await readBuzzPushEndpointGrants();
+      } catch (readError, readStack) {
+        reportPushSetupError('pending gateway cleanup', readError, readStack);
+      }
+      Error.throwWithStackTrace(error, stack);
+    }
+    if (!currentIntent()) {
+      if (ref.context.mounted && ref.read(communityListProvider).hasValue) {
+        await ref
+            .read(buzzPushLeaseRevocationOutboxProvider)
+            .reconcileGatewayCleanup(ref.read(communityListProvider).value!);
+      }
+      throw StateError('Push setup was superseded.');
+    }
     // Relay lease replacement and gateway delegation are independent state
     // machines. Subscription changes advance only the kind-30350 generation;
     // the opaque grant remains reusable until its own authority changes.
@@ -510,7 +680,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     await publishBuzzPushLeaseRecoverably(
       reserveGeneration: () =>
           notifier.reservePushLeaseGeneration(community.id),
-      publish: (leaseGeneration) => publishBuzzDevPushLeaseThroughRelay(
+      publish: (leaseGeneration) => publishBuzzDevPushLease(
         grant: grant,
         leaseInstallationId: community.pushLeaseInstallationId,
         leaseGeneration: leaseGeneration,
@@ -518,7 +688,17 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
         nsec: config.nsec!,
         memberPubkey: memberPubkey,
         subscriptions: desired,
-        relay: relay,
+        submit:
+            relay?.submit ??
+            ({required kind, required content, required tags, createdAt}) =>
+                submitSignedEventOnce(
+                  wsUrl: config.wsUrl,
+                  nsec: config.nsec!,
+                  kind: kind,
+                  content: content,
+                  tags: tags,
+                  createdAt: createdAt,
+                ),
       ),
       markAccepted: (leaseGeneration) => notifier.markPushLeaseAccepted(
         community.id,

@@ -126,6 +126,9 @@ assert!(production_env.find { |env| env["name"] == "BUZZ_PUSH_APNS_TOPIC" }["val
 route = YAML.load_stream(File.read(ARGV[2])).compact.find { |x| x["kind"] == "HTTPRoute" }
 assert!(!route.dig("spec", "parentRefs").empty?)
 assert!(route.dig("spec", "hostnames") == ["push.example"])
+route_deployment = YAML.load_stream(File.read(ARGV[2])).compact.find { |x| x["kind"] == "Deployment" }
+route_env = route_deployment.dig("spec", "template", "spec", "containers", 0, "env")
+assert!(route_env.find { |entry| entry["name"] == "BUZZ_PUSH_GATEWAY_ORIGIN" }["value"] == "https://push.example")
 RUBY
 
 # An origin is needed only to produce the optional routing hostname.

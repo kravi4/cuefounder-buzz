@@ -14,3 +14,5 @@ pub use http::{router, router_with_metrics, AppState};
 
 #[cfg(test)]
 mod http_delivery_tests;
+
+mod ingress;

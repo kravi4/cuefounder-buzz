@@ -49,7 +49,7 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
     let token_keyring =
         Arc::new(TokenKeyring::new(vec![TokenKey::new("test", &[2; 32]).unwrap()]).unwrap());
     let grant_keyring =
-        Arc::new(GrantKeyring::new(vec![GrantKey::new("test", &[1; 32]).unwrap()]).unwrap());
+        Arc::new(GrantKeyring::new(vec![GrantKey::new("g2_test", &[1; 32]).unwrap()]).unwrap());
     let installation_id = Uuid::new_v4();
     authority
         .create_installation(
@@ -70,16 +70,20 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
         .unwrap();
     let delegation_id = Uuid::new_v4();
     authority
-        .upsert_delegation(Delegation {
-            id: delegation_id,
-            installation_id,
-            relay_pubkey: keys.public_key().to_hex(),
-            endpoint_epoch: 1,
-            generation: 1,
-            not_before: now(),
-            expires_at: now() + 600,
-            revoked: false,
-        })
+        .upsert_delegation(
+            Delegation {
+                id: delegation_id,
+                grant_hash: None,
+                installation_id,
+                relay_pubkey: keys.public_key().to_hex(),
+                endpoint_epoch: 1,
+                generation: 1,
+                not_before: now(),
+                expires_at: now() + 600,
+                revoked: false,
+            },
+            None,
+        )
         .await
         .unwrap();
     let grant = grant_keyring
@@ -96,6 +100,9 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
     let sends = Arc::new(AtomicUsize::new(0));
     let (app, _) = router(AppState {
         grant_keyring,
+        issue_opaque_grants: false,
+        legacy_grants_until: None,
+        gateway_origin: "https://push.buzz.xyz".into(),
         authority,
         token_keyring,
         application: Arc::new(ApplicationRuntime {

@@ -3,7 +3,7 @@
 image:
   tag: ""
   digest: ""
-# Optional routing input, required only when httpRoute.enabled=true.
+# Set the exact deployment origin for v2 management authentication.
 gatewayOrigin: ""
 application:
   appAttestAppId: ""

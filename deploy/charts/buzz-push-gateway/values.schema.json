@@ -13,7 +13,7 @@
     },
     "gatewayOrigin": {
       "type": "string",
-      "description": "Routing origin for the optional HTTPRoute; not passed to the gateway binary.",
+      "description": "Gateway origin for management authentication and optional HTTPRoute; empty defaults to https://push.buzz.xyz.",
       "pattern": "^(https://[^/?#@:]+/?)?$"
     },
     "maxGrantLifetimeSeconds": {
@@ -21,6 +21,8 @@
       "minimum": 1,
       "maximum": 31536000
     },
+    "issueOpaqueGrants": { "type": "boolean" },
+    "legacyGrantsUntil": { "type": "integer", "minimum": 0 },
     "apnsKey": false,
     "deploymentAnnotations": {
       "type": "object",

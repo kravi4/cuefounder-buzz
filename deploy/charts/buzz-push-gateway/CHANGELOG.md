@@ -1,5 +1,9 @@
 # Chart release notes
 
+## 0.5.0
+
+- Add staged opaque grant issuance, bounded legacy acceptance, and deployment-origin authentication settings. Deploy readers everywhere before enabling `issueOpaqueGrants`; see the gateway deployment guide for grant and APNs storage-key rotation.
+
 ## 0.4.0
 
 - Replace `profiles.dogfood` with `application` and use unprefixed application/APNs environment variables. Requires the matching buzz-push-v1 gateway image and fresh authority store.

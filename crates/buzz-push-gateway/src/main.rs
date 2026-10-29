@@ -42,6 +42,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let c = Config::from_env()?;
+    let token_keyring = TokenKeyring::new(
+        c.token_keys
+            .iter()
+            .map(|key| TokenKey::new(&key.id, &key.key))
+            .collect::<Result<_, _>>()?,
+    )?;
+    if std::env::args().nth(1).as_deref() == Some("--reencrypt-token-storage") {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(|connection, _| Box::pin(async move {
+                sqlx::raw_sql("SET lock_timeout='2s'; SET statement_timeout='10s'; SET idle_in_transaction_session_timeout='15s'")
+                    .execute(connection).await?;
+                Ok(())
+            }))
+            .connect(&c.database_url)
+            .await?;
+        token_keyring.reencrypt_storage(&pool).await?;
+        tracing::info!("APNs token storage verified: zero rows require predecessor keys");
+        return Ok(());
+    }
     let metrics_handle = buzz_push_gateway::metrics::install()?;
     let app_attest_root = fs::read(&c.app_attest_root_cert_path)?;
     let configured = &c.application;
@@ -68,17 +88,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|key| GrantKey::new(&key.id, &key.key))
             .collect::<Result<_, _>>()?,
     )?;
-    let token_keyring = TokenKeyring::new(
-        c.token_keys
-            .iter()
-            .map(|key| TokenKey::new(&key.id, &key.key))
-            .collect::<Result<_, _>>()?,
-    )?;
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
+        .after_connect(|connection, _| Box::pin(async move {
+            sqlx::raw_sql("SET lock_timeout='2s'; SET statement_timeout='10s'; SET idle_in_transaction_session_timeout='15s'")
+                .execute(connection).await?;
+            Ok(())
+        }))
         .connect(&c.database_url)
         .await?;
+    token_keyring.audit_storage(&pool).await?;
     let authority = Arc::new(PostgresAuthorityStore::new(pool));
+    authority.verify_relay_allocations(chrono::Utc::now().timestamp()).await
+        .map_err(|_| "relay allocation preflight failed: require at most four live relay signers per APNs destination")?;
     authority
         .reap_expired(chrono::Utc::now().timestamp())
         .await?;
@@ -106,6 +128,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             token_keyring: Arc::new(token_keyring),
             application: Arc::new(application),
             max_grant_lifetime_seconds: c.max_grant_lifetime_seconds,
+            issue_opaque_grants: c.issue_opaque_grants,
+            legacy_grants_until: c.legacy_grants_until,
+            gateway_origin: c.gateway_origin.clone(),
             max_installation_lifetime_seconds: c.max_installation_lifetime_seconds,
             endpoint_quota_window_seconds: c.endpoint_quota_window_seconds,
             endpoint_quota_max_deliveries: c.endpoint_quota_max_deliveries,
@@ -119,12 +144,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (ptx, prx) = tokio::sync::watch::channel(false);
     let (htx, hrx) = tokio::sync::watch::channel(false);
     let p = tokio::spawn(async move {
-        axum::serve(pl, public)
-            .with_graceful_shutdown(async move {
-                let mut rx = prx;
-                let _ = rx.changed().await;
-            })
-            .await
+        axum::serve(
+            pl,
+            public.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let mut rx = prx;
+            let _ = rx.changed().await;
+        })
+        .await
     });
     let h = tokio::spawn(async move {
         axum::serve(hl, health)

@@ -15,14 +15,19 @@ migration:
   existingSecret: buzz-push-gateway-migrations
   databaseUrlKey: DATABASE_URL
   # Existing LOGIN role used by runtime DATABASE_URL. Migrations grant it only
-  # CONNECT plus DML on the six gateway tables in this dedicated database.
+  # CONNECT plus DML on the seven gateway tables in this dedicated database.
   runtimeDatabaseRole: buzz_push_gateway_runtime
   resources:
     requests: {cpu: 50m, memory: 64Mi}
     limits: {cpu: 250m, memory: 128Mi}
-# Routing origin used only when httpRoute.enabled=true. Not passed to the binary.
+# Deployment origin bound into v2 management assertions; empty uses push.buzz.xyz.
+# Also supplies the hostname when httpRoute.enabled=true.
 gatewayOrigin: ""
 maxGrantLifetimeSeconds: 2592000
+# Read support must reach every replica before enabling issuance.
+issueOpaqueGrants: false
+# Unix timestamp; required with opaque issuance while legacy grant keys remain.
+legacyGrantsUntil: 0
 application:
   # Production MUST override this with the exact Apple TEAMID.bundle-id.
   appAttestAppId: TEAMID.com.example.buzz

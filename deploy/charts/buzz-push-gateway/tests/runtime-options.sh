@@ -10,6 +10,8 @@ helm template push "$chart" \
   --set terminationGracePeriodSeconds=90 >"$out/runtime.yaml"
 helm template push "$chart" --set networkPolicy.enabled=false \
   --set networkPolicy.externalPolicyName=platform-runtime >"$out/external.yaml"
+helm template push "$chart" --set issueOpaqueGrants=true --set legacyGrantsUntil=2000000000 \
+  --set gatewayOrigin=https://push.example >"$out/protocol.yaml"
 env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby -ryaml - "$out" <<'RUBY'
 base, runtime, external = %w[default runtime external].map { |name| YAML.load_stream(File.read("#{ARGV[0]}/#{name}.yaml")).compact }
 pod = runtime.find { |r| r['kind'] == 'Deployment' }.dig('spec', 'template')
@@ -21,6 +23,12 @@ raise 'runtime options changed unrelated resources or selectors' unless runtime 
 expected = base.reject { |r| r['kind'] == 'NetworkPolicy' && r['metadata']['name'] == 'push-buzz-push-gateway' }
 external.find { |r| r['kind'] == 'Deployment' }['metadata'].delete('annotations')
 raise 'external policy mode changed migration isolation or other resources' unless external == expected
+protocol = YAML.load_stream(File.read("#{ARGV[0]}/protocol.yaml")).compact.find { |r| r['kind'] == 'Deployment' }
+env = protocol.dig('spec', 'template', 'spec', 'containers', 0, 'env').to_h { |entry| [entry['name'], entry] }
+raise 'opaque issuance flag missing' unless env['BUZZ_PUSH_ISSUE_OPAQUE_GRANTS']['value'] == 'true'
+raise 'legacy deadline must be decimal' unless env['BUZZ_PUSH_LEGACY_GRANTS_UNTIL']['value'] == '2000000000'
+raise 'management origin missing' unless env['BUZZ_PUSH_GATEWAY_ORIGIN']['value'] == 'https://push.example'
+raise 'retired legacy keys must be optional' unless env.dig('BUZZ_PUSH_GRANT_KEYS', 'valueFrom', 'secretKeyRef', 'optional') == true
 RUBY
 reject() {
   if helm template push "$chart" "$@" >"$out/invalid.log" 2>&1; then

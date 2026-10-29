@@ -1,5 +1,4 @@
-//! Authenticated, expiring endpoint grants. The gateway is stateless: relays
-//! retain the opaque ciphertext and present it on each delivery attempt.
+//! Random delivery capabilities, plus a temporary reader for legacy ciphertexts.
 use std::collections::{HashMap, HashSet};
 
 use crate::model::{EndpointGrant, MAX_GRANT_BYTES};
@@ -21,7 +20,7 @@ pub struct GrantKey {
 
 #[derive(Clone)]
 pub struct GrantKeyring {
-    current: GrantKey,
+    current: Option<GrantKey>,
     predecessors: HashMap<String, GrantKey>,
 }
 
@@ -105,13 +104,16 @@ impl GrantKey {
 }
 
 impl GrantKeyring {
-    /// Build a keyring ordered current key first, then decrypt-only predecessors.
+    /// Build the temporary legacy keyring, current key first. An empty ring
+    /// disables legacy capabilities after retirement.
     pub fn new(keys: Vec<GrantKey>) -> Result<Self, GrantError> {
         let mut keys = keys.into_iter();
-        let current = keys.next().ok_or(GrantError::EmptyKeyring)?;
+        let current = keys.next();
         let predecessor_keys: Vec<_> = keys.collect();
         let mut ids = HashSet::with_capacity(predecessor_keys.len() + 1);
-        if !ids.insert(current.id.as_str())
+        if current
+            .as_ref()
+            .is_some_and(|key| !ids.insert(key.id.as_str()))
             || predecessor_keys
                 .iter()
                 .any(|key| !ids.insert(key.id.as_str()))
@@ -130,7 +132,10 @@ impl GrantKeyring {
 
     /// Mint with the current key only.
     pub fn issue(&self, grant: &EndpointGrant) -> Result<String, GrantError> {
-        self.current.seal(grant)
+        self.current
+            .as_ref()
+            .ok_or(GrantError::EmptyKeyring)?
+            .seal(grant)
     }
 
     /// Open with the key selected by the authenticated envelope key id.
@@ -139,14 +144,48 @@ impl GrantKeyring {
             return Err(GrantError::Invalid);
         }
         let (id, _) = encoded.split_once('.').ok_or(GrantError::Invalid)?;
-        if id == self.current.id {
-            return self.current.open(encoded);
+        if let Some(key) = &self.current {
+            if id == key.id {
+                return key.open(encoded);
+            }
         }
         self.predecessors
             .get(id)
             .ok_or(GrantError::Invalid)?
             .open(encoded)
     }
+}
+
+/// Mint 256 random bits; only the digest is persisted as authority.
+pub fn issue_opaque() -> Result<(String, [u8; 32]), GrantError> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|_| GrantError::Invalid)?;
+    let grant = format!("g2_{}", URL_SAFE_NO_PAD.encode(bytes));
+    let hash = opaque_hash(&grant)?;
+    Ok((grant, hash))
+}
+
+/// Validate the canonical opaque envelope and hash the entire presented token.
+pub fn opaque_hash(grant: &str) -> Result<[u8; 32], GrantError> {
+    use sha2::{Digest, Sha256};
+    let encoded = grant.strip_prefix("g2_").ok_or(GrantError::Invalid)?;
+    if encoded.len() != 43
+        || URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|_| GrantError::Invalid)?
+            .len()
+            != 32
+    {
+        return Err(GrantError::Invalid);
+    }
+    Ok(Sha256::digest(grant.as_bytes()).into())
+}
+
+/// The indexed lookup is a digest prefix; authorization compares all 256 bits.
+pub fn opaque_id(hash: &[u8; 32]) -> uuid::Uuid {
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash[..16]);
+    uuid::Uuid::from_bytes(id)
 }
 
 #[cfg(test)]
@@ -232,9 +271,9 @@ mod tests {
             ]),
             Err(GrantError::DuplicateKeyId)
         ));
-        assert!(matches!(
-            GrantKeyring::new(Vec::new()),
-            Err(GrantError::EmptyKeyring)
-        ));
+        assert!(GrantKeyring::new(Vec::new())
+            .unwrap()
+            .open("old.AAAA")
+            .is_err());
     }
 }

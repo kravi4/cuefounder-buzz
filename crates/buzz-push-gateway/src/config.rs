@@ -40,6 +40,12 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     pub health_addr: SocketAddr,
     pub max_grant_lifetime_seconds: i64,
+    /// Enable only after every replica can read opaque grants.
+    pub issue_opaque_grants: bool,
+    /// Last acceptance time for encrypted grants and challenge-based management.
+    pub legacy_grants_until: Option<i64>,
+    /// Canonical deployment origin bound into v2 management assertions.
+    pub gateway_origin: String,
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
     pub endpoint_quota_max_deliveries: i64,
@@ -158,7 +164,47 @@ impl Config {
                 .filter(|v| !v.is_empty())
                 .ok_or(ConfigError::Missing(k))
         }
-        let grant_keys = parse_keyring(e, "BUZZ_PUSH_GRANT_KEYS")?;
+        let issue_opaque_grants = match e.get("BUZZ_PUSH_ISSUE_OPAQUE_GRANTS").map(String::as_str) {
+            None | Some("false") => false,
+            Some("true") => true,
+            Some(_) => return Err(ConfigError::Invalid("BUZZ_PUSH_ISSUE_OPAQUE_GRANTS")),
+        };
+        let grant_keys =
+            if issue_opaque_grants && e.get("BUZZ_PUSH_GRANT_KEYS").is_none_or(String::is_empty) {
+                Vec::new()
+            } else {
+                parse_keyring(e, "BUZZ_PUSH_GRANT_KEYS")?
+            };
+        let legacy_grants_until = e
+            .get("BUZZ_PUSH_LEGACY_GRANTS_UNTIL")
+            .map(|value| {
+                value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or(ConfigError::Invalid("BUZZ_PUSH_LEGACY_GRANTS_UNTIL"))
+            })
+            .transpose()?;
+        if issue_opaque_grants && !grant_keys.is_empty() && legacy_grants_until.is_none() {
+            return Err(ConfigError::Missing("BUZZ_PUSH_LEGACY_GRANTS_UNTIL"));
+        }
+        let origin = e
+            .get("BUZZ_PUSH_GATEWAY_ORIGIN")
+            .map(String::as_str)
+            .unwrap_or("https://push.buzz.xyz");
+        let gateway_origin = url::Url::parse(origin)
+            .ok()
+            .filter(|url| {
+                url.scheme() == "https"
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.path() == "/"
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+            })
+            .map(|url| url.origin().ascii_serialization())
+            .ok_or(ConfigError::Invalid("BUZZ_PUSH_GATEWAY_ORIGIN"))?;
         let token_keys = parse_keyring(e, "BUZZ_PUSH_TOKEN_KEYS")?;
         if grant_keys.iter().any(|grant| {
             token_keys
@@ -172,6 +218,15 @@ impl Config {
             .ok()
             .filter(|seconds| (1..=31_536_000).contains(seconds))
             .ok_or(ConfigError::Invalid("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS"))?;
+        if legacy_grants_until.is_some_and(|deadline| {
+            deadline
+                > chrono::Utc::now()
+                    .timestamp()
+                    .saturating_add(max_grant_lifetime_seconds)
+                    .saturating_add(300)
+        }) {
+            return Err(ConfigError::Invalid("BUZZ_PUSH_LEGACY_GRANTS_UNTIL"));
+        }
         let max_installation_lifetime_seconds = e
             .get("BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS")
             .map(String::as_str)
@@ -196,6 +251,11 @@ impl Config {
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS", 10, 86_400)?;
         let endpoint_quota_max_deliveries =
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES", 10, 10_000)?;
+        if endpoint_quota_max_deliveries < 4 {
+            return Err(ConfigError::Invalid(
+                "BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES",
+            ));
+        }
         let application = parse_application(e)?;
         let bind_addr = e
             .get("BUZZ_PUSH_BIND_ADDR")
@@ -213,6 +273,9 @@ impl Config {
             bind_addr,
             health_addr,
             max_grant_lifetime_seconds,
+            issue_opaque_grants,
+            legacy_grants_until,
+            gateway_origin,
             max_installation_lifetime_seconds,
             endpoint_quota_window_seconds,
             endpoint_quota_max_deliveries,
@@ -367,6 +430,41 @@ mod tests {
     }
 
     #[test]
+    fn opaque_rollout_requires_a_bounded_legacy_window_and_no_steady_state_grant_keys() {
+        let mut env = base();
+        env.insert("BUZZ_PUSH_ISSUE_OPAQUE_GRANTS".into(), "true".into());
+        assert!(matches!(
+            Config::from_map(&env),
+            Err(ConfigError::Missing("BUZZ_PUSH_LEGACY_GRANTS_UNTIL"))
+        ));
+        env.insert(
+            "BUZZ_PUSH_LEGACY_GRANTS_UNTIL".into(),
+            (chrono::Utc::now().timestamp() + 2592000).to_string(),
+        );
+        assert!(Config::from_map(&env).unwrap().issue_opaque_grants);
+        env.insert(
+            "BUZZ_PUSH_LEGACY_GRANTS_UNTIL".into(),
+            (chrono::Utc::now().timestamp() + 31536001).to_string(),
+        );
+        assert!(Config::from_map(&env).is_err());
+        env.remove("BUZZ_PUSH_GRANT_KEYS");
+        env.remove("BUZZ_PUSH_LEGACY_GRANTS_UNTIL");
+        let config = Config::from_map(&env).unwrap();
+        assert!(config.grant_keys.is_empty());
+        assert_eq!(config.gateway_origin, "https://push.buzz.xyz");
+        for invalid in [
+            "http://push.buzz.xyz",
+            "https://user@push.buzz.xyz",
+            "https://push.buzz.xyz/path",
+            "https://push.buzz.xyz?query",
+            "",
+        ] {
+            env.insert("BUZZ_PUSH_GATEWAY_ORIGIN".into(), invalid.into());
+            assert!(Config::from_map(&env).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
     fn malformed_security_configuration_fails_startup() {
         for (key, value) in [
             ("BUZZ_PUSH_APP_ATTEST_APP_ID", ""),
@@ -376,6 +474,8 @@ mod tests {
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "2.592e+06"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "2592000.5"),
             ("BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS", "0"),
+            ("BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES", "3"),
+            ("BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS", "86401"),
         ] {
             let mut env = base();
             env.insert(key.into(), value.into());

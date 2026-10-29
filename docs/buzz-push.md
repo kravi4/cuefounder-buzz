@@ -10,15 +10,34 @@ stable specification after validating the design through launch and use.
 - Each gateway serves one server-configured Apple application and APNs transport.
   Enrollment, transcripts, grants, leases and discovery have no application-profile
   selector. The relay advertises transport classes in `class_support`.
-- Existing grants and pending enrollment records are not migrated. The new client
-  uses separate Keychain records and enrolls again. Keep old production push
-  disabled so released clients never acquire legacy push authority.
-- Stop old gateway replicas before cutover. The gateway migration requires an
-  empty authority store because endpoint fingerprints changed. The relay migration
-  requires no active legacy leases. Neither migration deletes that state.
+- The earlier single-application initialization requires an empty pre-launch
+  authority store. The opaque-grant upgrade preserves initialized installations,
+  active authority, assertion counters and revocation tombstones.
 - Publish the matching gateway image and chart, update deployment configuration,
   then enable the new relay capability. Verify enrollment, delivery, renewal and
   revocation on a physical device before production activation.
+
+## Gateway grants and management
+
+The gateway keeps application-encrypted APNs tokens and App Attest installation
+keys. Enrollment alone uses a one-use public challenge. New management requests
+bind the gateway origin, operation, targets, parameters, versions and a short
+expiry in their App Attest assertion. The counter and permission mutation commit
+together. TLS, fixed reconnect contents and relay NIP-98 body/path/time/signature
+verification remain required.
+
+Each relay authorization returns a fresh 256-bit random grant. Only its SHA-256
+hash and authoritative permission state are stored. Renewal replaces the old
+grant; response loss requires newer-generation reissuance, with durable client
+handoff/cleanup state retained until completion. Revocation blocks new admission,
+but cannot recall work already admitted.
+
+Opaque grants are compatible with existing relay lease storage. Gateway replicas
+must deploy read support before any issues the new format. Legacy encrypted
+grants and challenge-based management have an explicit bounded transition;
+APNs token encryption is permanent. See [deployment guidance](push-gateway-deployment.md)
+for the reader/writer rollout, legacy deadline, storage re-encryption command and
+key-retirement evidence.
 
 ## Channel identifier grammar
 

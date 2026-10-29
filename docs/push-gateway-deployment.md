@@ -4,7 +4,7 @@
 
 ## Network and health
 
-- Public listener: `BUZZ_PUSH_BIND_ADDR` (default `0.0.0.0:8080`). Route the deployment hostname to this port; the binary needs no public-origin setting.
+- Public listener: `BUZZ_PUSH_BIND_ADDR` (default `0.0.0.0:8080`). Terminate TLS at ingress. Set `BUZZ_PUSH_GATEWAY_ORIGIN` to the deployment's canonical HTTPS origin; v2 management assertions bind that origin. Its default is `https://push.buzz.xyz`.
 - Private health listener: `BUZZ_PUSH_HEALTH_ADDR` (default `0.0.0.0:8081`). Probe `/_liveness` and `/_readiness`; do not expose this port publicly. The chart has no pod-ingress allowance for 8081; Kubernetes node/kubelet-origin probe traffic is exempt from NetworkPolicy. Add a narrowly selected monitoring source only if the target CNI requires pod-origin health scraping.
 - Readiness fails when PostgreSQL authority is unavailable. Graceful shutdown stops accepting new requests before draining in-flight APNs calls.
 
@@ -12,7 +12,7 @@
 
 | Variable | Purpose |
 |---|---|
-| `DATABASE_URL` | PostgreSQL authority/admission store. Runtime credentials need DML on the six gateway tables, not DDL. |
+| `DATABASE_URL` | PostgreSQL authority/admission store. Runtime credentials need DML on the seven gateway tables, not DDL. |
 | `BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS` | Maximum delegation capability lifetime (`1..=31536000`). |
 | `BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS` | Maximum encrypted-token installation lifetime (default 90 days, max one year). Clients must renew before expiry. |
 | `BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH` | Read-only mounted Apple App Attest root certificate PEM. |
@@ -20,8 +20,10 @@
 | `BUZZ_PUSH_APNS_TOPIC` | Server-owned APNs topic. Never accepted from a client. |
 | `BUZZ_PUSH_APNS_ENVIRONMENT` | `production` or `sandbox`, selected by deployment configuration. |
 | `BUZZ_PUSH_APNS_CERT_PATH` | Read-only certificate/private-key PEM. |
-| `BUZZ_PUSH_GRANT_KEYS` | Capability AEAD keyring, `id:base64-32-bytes[,predecessor...]`; current key first. |
+| `BUZZ_PUSH_GRANT_KEYS` | Temporary legacy capability AEAD keys, `id:base64-32-bytes[,predecessor...]`; current first during reader rollout. Omit after legacy retirement. New opaque grants use no encryption key. |
 | `BUZZ_PUSH_TOKEN_KEYS` | Independent token-custody AEAD keyring in the same format. Never reuse grant keys. |
+| `BUZZ_PUSH_ISSUE_OPAQUE_GRANTS` | Defaults to `false` for reader-first rollout; enable only after every replica reads opaque grants. |
+| `BUZZ_PUSH_LEGACY_GRANTS_UNTIL` | Unix acceptance deadline for legacy grants/management. Required when opaque issuance is enabled while legacy keys remain; at most the configured maximum grant lifetime plus 300 seconds ahead. |
 
 Each gateway serves one configured Apple application. App Attest validates
 `application.appAttestAppId` (`TEAMID.bundle-id`) before enrollment. APNs uses
@@ -31,7 +33,15 @@ gateway deployments and authority databases.
 
 See [Buzz push notes](buzz-push.md) for the current experimental contract.
 
-Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS` (default `10`, max `86400`) and `BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES` (default `10`, max `10000`). These are Buzz policy hypotheses, not Apple-published limits; tune under load while retaining a hard ceiling.
+Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS` (default `10`, max `86400`) and `BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES` (default `10`, range `4..=10000`). Each stable APNs destination admits at most four relay allocations; each relay can consume only one quarter of the device cap (rounded down), so renewals cannot reset usage or consume another relay's share. Exhaustion returns 429 with `Retry-After`; replay IDs remain available for the relay's durable retry. These are Buzz policy hypotheses, not Apple-published limits; tune under load while retaining a hard ceiling.
+
+Enrollment, management, revocation and delivery have separate bounded concurrency
+and source-rate lanes. Public enrollment or invalid grants cannot occupy reserved
+revocation slots. Source identity is the TCP peer, never `Forwarded` or
+`X-Forwarded-For`; preserve source addresses at ingress where possible. A proxy
+that hides sources shares one source budget. Source bookkeeping is capped at
+4096 entries per lane; the database pool has 20 connections with admission lanes
+using at most 18 concurrently.
 
 ## Personal device development
 
@@ -60,13 +70,22 @@ notification presentation on a physical device, not a simulator.
 
 ## Secret and key rotation rules
 
-Mount the App Attest root read-only and startup will reject any byte mismatch. The sole accepted artifact is Apple’s **Apple App Attestation Root CA** from `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem`: certificate SHA-256 fingerprint `1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32`; exact PEM-file SHA-256 `c778d09ac341f7fd9f8f3b19e2b815af6aed4ad4490e1e92c05cb355212a5013`. Treat an Apple root rotation as a reviewed code/config rollout, not an unpinned mount replacement. Mount the APNs certificate identity and both AEAD keyrings from a secret manager; never place values in an image, manifest, log, or metrics label. Keep the current AEAD key first and retain decrypt-only predecessors until every capability/token encrypted under them has expired or been re-encrypted. Grant and token key ids and bytes must be distinct. Rotation is an operator rollout: add the new current key while retaining predecessors, deploy, wait through the retention window, then remove the old key.
+Mount the App Attest root read-only and startup will reject any byte mismatch. The sole accepted artifact is Apple’s **Apple App Attestation Root CA** from `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem`: certificate SHA-256 fingerprint `1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32`; exact PEM-file SHA-256 `c778d09ac341f7fd9f8f3b19e2b815af6aed4ad4490e1e92c05cb355212a5013`. Treat an Apple root rotation as a reviewed code/config rollout, not an unpinned mount replacement. Mount the APNs certificate identity and keyrings from a secret manager; never place values in an image, manifest, log, or metrics label. Grant and token key ids and bytes must be distinct.
+
+APNs token ciphertext format remains unchanged. Rotate storage keys in this order:
+
+1. Distribute `old,new` to every replica, keeping `old` first. Verify all running and rollback readers have both keys before changing writers.
+2. Roll out `new,old`. Drain every old-key writer, including old replicas and maintenance jobs. Keep rollback readers able to decrypt both keys.
+3. Run `buzz-push-gateway --reencrypt-token-storage` with the deployment's environment and `new,old`. It needs database DML, scans a finite snapshot in batches of 128, and conditionally replaces ciphertext only when the original ciphertext, endpoint epoch and fingerprint still match. Concurrent endpoint changes win. Rerun on failure; it fails unless a final audit finds zero predecessor-key rows.
+4. Preserve the successful command result as retirement evidence. Only then remove the old reader key from the running service. Every startup decrypts all retained token rows, including revoked/expired rows, and refuses to start if any configured reader key is missing or incorrect. Do not restart old writers after the audit.
+
+Renewal can extend installation lifetime indefinitely; elapsed time cannot prove storage-key retirement is safe. Keep protected recovery copies of old keys for as long as retained backups need them. Restore backups with their required reader keys, re-encrypt and audit before serving.
 
 The gateway stores APNs tokens encrypted in PostgreSQL. Database backups therefore contain ciphertext plus authority metadata and must receive the same access controls and retention treatment as the service secrets.
 
 ## PostgreSQL and replicas
 
-### First deployment, not a legacy upgrade
+### Initial application-profile cutover
 
 This gateway has never been deployed outside personal development infrastructure.
 This release supports a fresh dedicated database, not migration of existing
@@ -77,19 +96,22 @@ stop the development gateway and provision a fresh database. It does not delete
 or migrate that data. Normal deployments of an already initialized gateway may
 retain their data.
 
+This prerequisite applies to the earlier single-application migration, not the
+opaque-grant protocol upgrade below. Existing initialized authority, assertion
+counters and revocation tombstones remain intact during this upgrade.
+
 Do not run a rolling upgrade from a pre-launch development binary. Stop that
 deployment before initialization, use the fresh database, and do not roll back
-to a pre-launch binary against the new database. The rolling strategy is for
-compatible versions after initial deployment; no legacy writer compatibility or
-mobile configured-to-unconfigured migration is supported. Push has no existing
-enabled users. After enabling push, retain gateway configuration in updates to
+to a pre-launch binary against the new database. The protocol transition below
+preserves initialized authority. A mobile configured-to-unconfigured migration
+is unsupported. After enabling push, retain gateway configuration in updates to
 that app identity; omitting it is not a push shutdown mechanism.
 
-The gateway's dedicated pool does not consume the relay-oriented `BUZZ_DB_LOCK_TIMEOUT_MS`, `BUZZ_DB_IDLE_TXN_TIMEOUT_MS`, or `BUZZ_DB_STATEMENT_TIMEOUT_MS` settings. Its session-timeout policy remains separate from the `buzz-db` writer policy and must be designed and rolled out independently.
+The gateway's dedicated pool does not consume the relay-oriented `BUZZ_DB_LOCK_TIMEOUT_MS`, `BUZZ_DB_IDLE_TXN_TIMEOUT_MS`, or `BUZZ_DB_STATEMENT_TIMEOUT_MS` settings. Runtime and storage-maintenance connections use 2-second lock, 10-second statement and 15-second idle-transaction timeouts.
 
-All replicas must share one PostgreSQL database. Delivery authority, replay admission, and endpoint quota reservation are transactional there, so replica count does not multiply the abuse ceiling. The gateway owns a scoped migration history under `crates/buzz-push-gateway/migrations`; it creates only the six `push_gateway_*` authority tables plus SQLx's migration-history table and never runs relay migrations.
+All replicas must share one PostgreSQL database. Delivery authority, replay admission, and endpoint quota reservation are transactional there, so replica count does not multiply the abuse ceiling. The gateway owns a scoped migration history under `crates/buzz-push-gateway/migrations`; it creates only the seven `push_gateway_*` authority tables plus SQLx's migration-history table and never runs relay migrations.
 
-The Helm chart runs a single pre-install/pre-upgrade migration Job using `migration.existingSecret`; that secret contains a DDL-capable `DATABASE_URL`. The URL MUST name a dedicated gateway database, not the relay database: SQLx stores its `_sqlx_migrations` history in `public`, so sharing a database would collide with another application's migration history. `migration.runtimeDatabaseRole` names an existing LOGIN role (the default is `buzz_push_gateway_runtime`) used by runtime `DATABASE_URL`. After scoped migrations, the Job revokes database `CREATE` from that role and schema `CREATE` from both `PUBLIC` and the role, then grants only database `CONNECT`, schema `USAGE`, and `SELECT, INSERT, UPDATE, DELETE` on the six gateway tables. The migration role must own the database/schema objects or otherwise be allowed to issue those grants; it is never provided to runtime replicas. Readiness rejects an empty/partial schema, missing DML, or a runtime role that retains database/schema `CREATE`. Helm waits for the migration hook before updating replicas, so rolling deployments never race unconditional startup migration. Readiness must be removed from load-balancer service endpoints before terminating a pod.
+The Helm chart runs a single pre-install/pre-upgrade migration Job using `migration.existingSecret`; that secret contains a DDL-capable `DATABASE_URL`. The URL MUST name a dedicated gateway database, not the relay database: SQLx stores its `_sqlx_migrations` history in `public`, so sharing a database would collide with another application's migration history. `migration.runtimeDatabaseRole` names an existing LOGIN role (the default is `buzz_push_gateway_runtime`) used by runtime `DATABASE_URL`. After scoped migrations, the Job revokes database `CREATE` from that role and schema `CREATE` from both `PUBLIC` and the role, then grants only database `CONNECT`, schema `USAGE`, and `SELECT, INSERT, UPDATE, DELETE` on the seven gateway tables. The migration role must own the database/schema objects or otherwise be allowed to issue those grants; it is never provided to runtime replicas. Readiness rejects an empty/partial schema, missing DML, or a runtime role that retains database/schema `CREATE`. Helm waits for the migration hook before updating replicas, so rolling deployments never race unconditional startup migration. Readiness must be removed from load-balancer service endpoints before terminating a pod.
 
 The service reaps expired challenges and replay rows, idle quota rows, expired/revoked delegations, and retention-eligible installations (including their encrypted token ciphertext) at startup and every five minutes. Monitor reaper failures and table growth; retention does not depend on process restarts.
 
@@ -189,6 +211,60 @@ the client App Attest enrollment/delegation flow to place a gateway-issued opaqu
 capability—not a raw APNs token—into the encrypted relay lease.
 
 ## Evaluation and rollout
+
+### Opaque-grant protocol upgrade
+
+Before rollout, count destinations with more than four approved relay signers:
+
+```sql
+SELECT count(*) FROM (
+  SELECT i.token_fingerprint
+  FROM push_gateway_installations i JOIN push_gateway_delegations d ON d.installation_id=i.id
+  WHERE i.revoked_at IS NULL AND d.revoked_at IS NULL
+    AND i.expires_at >= now() AND d.expires_at >= now() AND i.endpoint_epoch=d.endpoint_epoch
+  GROUP BY i.token_fingerprint HAVING count(DISTINCT d.relay_pubkey)>4
+) excess;
+```
+
+The result must be zero. If it is not, use authenticated phone revocation to
+reduce approvals explicitly before upgrading; startup refuses excess allocations
+without changing authority. Pause delivery and delegation issuance at ingress,
+drain old delivery requests and delegation writers, and deploy the admission
+policy to every replica. Recheck the preflight after old writers have drained.
+Keep the quota window unchanged and wait one full window before reopening
+delivery and issuance, so old
+admissions cannot spend the new reserved shares. Keep revocation reachable
+during this transition.
+
+Apply the additive gateway schema first. Deploy this release everywhere with
+`issueOpaqueGrants=false` and the existing grant keys. It reads both formats
+while issuing legacy grants, so old replicas and clients continue to work.
+Keep the same authority database; encrypted grants cannot be recovered from
+permission rows or converted into raw opaque grants by a backfill.
+
+After all replicas run this reader release, deploy `issueOpaqueGrants=true`
+with one fixed `legacyGrantsUntil` timestamp. Choose a deadline after the last
+legacy issuance plus the previous maximum grant lifetime and 300 seconds for
+management freshness. Do not lower the configured maximum lifetime during this
+window. All replicas must use the same deadline; do not extend it on restart.
+Distribute the shared deadline before switching issuance. Legacy issuance refuses
+requested lifetimes beyond it; update clients or request a shorter lifetime as
+the deadline approaches.
+New clients use signed v2 management without enrollment challenges. Existing
+clients retain challenge-based management and encrypted grant validation until
+the deadline. Renewals replace grants atomically; clients must obtain a newer
+generation after a lost issuance response because the gateway stores only hashes.
+
+Once opaque issuance starts, rollback only to this dual-reader release with
+opaque issuance enabled; older binaries cannot read the new grants. Before
+the deadline, distribute an updated client to active installations and verify
+renewal/revocation with both versions. After the deadline remove legacy grant
+keys, retaining `issueOpaqueGrants=true`. New grants need no encryption keys;
+APNs token storage keys remain required. Legacy retirement never deletes
+assertion counters, permission versions or revocation tombstones.
+
+Revocation prevents new delivery admission; it cannot recall a push already
+admitted or accepted by APNs.
 
 Enable push only after a physical-device test with the deployment's configured
 application identity, APNs topic, certificate and environment. Updated clients
@@ -335,8 +411,8 @@ the environment's GitOps values; the chart then renders
 `values-production.yaml` remains an intentionally invalid production-input
 contract: deployment CI must inject the verified image digest, the provisioned
 distributed Apple application identifier, its matching APNs topic, and the actual PostgreSQL network. Set
-`gatewayOrigin` only when enabling the chart’s optional HTTPRoute; it supplies
-the routing hostname and is not passed to the gateway binary. In an
+`gatewayOrigin` to bind v2 management assertions to the deployment origin; it
+also supplies the routing hostname for the optional HTTPRoute. In an
 environment with an existing ingress or service mesh route, keep
 `httpRoute.enabled=false`. If this chart owns a Gateway API route, enable it and
 inject an environment-owned `parentRef`; schema validation rejects an enabled
@@ -393,4 +469,5 @@ method must be `POST`; the signed URL path must be `/v1/deliveries/apns`, withou
 query, fragment or credentials. Incoming request queries are rejected.
 Host and forwarding headers do not participate in delivery authentication.
 Event signatures, body hashes, timestamps, grant checks and replay protection
-remain enforced. No mobile App Attest audiences or relay activation settings change.
+remain enforced. V1 App Attest audiences and relay activation settings remain compatible; v2
+management additionally binds the configured deployment origin.

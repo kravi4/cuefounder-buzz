@@ -58,6 +58,158 @@ void main() {
     expect(records.single.relayUrl, 'https://relay.example/');
   });
 
+  test(
+    'gateway target survives failed cleanup and is omitted for shared signer',
+    () async {
+      final community =
+          Community.create(
+            name: 'First',
+            relayUrl: 'wss://relay.example',
+            nsec: keys.nsec,
+          ).copyWith(
+            pubkey: keys.public,
+            pushNotificationsEnabled: true,
+            pushSubscriptionState:
+                const BuzzPushLeaseSubscriptionState.desired()
+                    .withReservedGeneration(4),
+          );
+      final grant = _grant(expiresAt: clock.seconds + 3600);
+      final outbox = _outbox(
+        storage: storage,
+        clock: clock,
+        scheduler: scheduler,
+        publisher: (_) async => throw StateError('gateway response lost'),
+      );
+      await outbox.enqueueCommunity(community, readGrants: () async => [grant]);
+      final before = (await storage.loadAll()).single.gatewayRevocation;
+      expect(before?['generation'], 1);
+      expect(
+        before?['installationHandle'],
+        '22222222-2222-4222-8222-222222222222',
+      );
+      await outbox.trigger();
+      expect((await storage.loadAll()).single.gatewayRevocation, before);
+      await storage.replaceAll([]);
+      final sibling = Community.create(
+        name: 'Second',
+        relayUrl: 'wss://relay.example',
+        nsec: keys.nsec,
+      ).copyWith(pushNotificationsEnabled: true);
+      await outbox.enqueueCommunity(
+        community,
+        readGrants: () async => [grant],
+        remainingCommunities: [sibling],
+      );
+      expect((await storage.loadAll()).single.gatewayRevocation, isNull);
+    },
+  );
+
+  test(
+    'canceled first enrollment remains durable past its old expiry',
+    () async {
+      final community = Community.create(
+        name: 'Canceled',
+        relayUrl: 'wss://relay.example',
+      ).copyWith(pushNotificationsEnabled: false);
+      final pending = BuzzPushEndpointGrant(
+        pending: true,
+        relayOrigin: 'wss://relay.example',
+        relayPubkey: 'a' * 64,
+        installationId: '0' * 32,
+        endpointGrant: '',
+        endpointHash: 'b' * 64,
+        endpointEpoch: 1,
+        generation: 1,
+        expiresAt: clock.seconds + 1,
+      );
+      var attempts = 0;
+      final outbox = _outbox(
+        storage: storage,
+        clock: clock,
+        scheduler: scheduler,
+        publisher: (_) async {
+          attempts += 1;
+          throw StateError('native enrollment still in flight');
+        },
+      );
+      await outbox.reconcileGatewayCleanup([
+        community,
+      ], readGrants: () async => [pending]);
+      final target = (await storage.loadAll()).single;
+      expect(target.gatewayOnly, isTrue);
+      expect(target.gatewayRevocation?['relayOrigin'], pending.relayOrigin);
+      expect(target.gatewayRevocation?['installationHandle'], isNull);
+      clock.seconds += 2;
+      await outbox.trigger();
+      expect(attempts, 1);
+      expect(await storage.loadAll(), hasLength(1));
+      await storage.replaceAll([]);
+      await outbox.reconcileGatewayCleanup([
+        community.copyWith(pushNotificationsEnabled: true),
+      ], readGrants: () async => [pending]);
+      expect(
+        await storage.loadAll(),
+        isEmpty,
+        reason: 'an enabled sibling retains shared authority',
+      );
+    },
+  );
+
+  test(
+    'gateway cleanup retains separate authorities after relay key rotation',
+    () async {
+      final outbox = _outbox(
+        storage: storage,
+        clock: clock,
+        scheduler: scheduler,
+        publisher: (_) async => throw StateError('offline'),
+      );
+      final first = _grant(expiresAt: clock.seconds + 3600);
+      await outbox.reconcileGatewayCleanup([], readGrants: () async => [first]);
+      await outbox.trigger();
+      expect((await storage.loadAll()).single.generation, 2);
+      final second = _grant(
+        expiresAt: clock.seconds + 3600,
+        relayPubkey: 'c' * 64,
+      );
+      await outbox.reconcileGatewayCleanup(
+        [],
+        readGrants: () async => [second],
+      );
+      final records = await storage.loadAll();
+      expect(records, hasLength(2));
+      expect(
+        records
+            .map((record) => record.gatewayRevocation?['relayPubkey'])
+            .toSet(),
+        {'a' * 64, 'c' * 64},
+      );
+      expect(records.last.generation, 1);
+    },
+  );
+
+  test(
+    'gateway version does not become the JSON-safe local retry counter',
+    () async {
+      final outbox = _outbox(
+        storage: storage,
+        clock: clock,
+        scheduler: scheduler,
+        publisher: (_) async {},
+      );
+      const maximum = 9223372036854775807;
+      await outbox.reconcileGatewayCleanup(
+        [],
+        readGrants: () async => [
+          _grant(expiresAt: clock.seconds + 3600, generation: maximum),
+        ],
+      );
+      final record = (await storage.loadAll()).single;
+      expect(record.generation, 1);
+      expect(record.gatewayRevocation?['generation'], maximum);
+    },
+  );
+
   test('legacy community revokes its grant-addressed lease', () async {
     final outbox = _outbox(
       storage: storage,
@@ -296,14 +448,20 @@ BuzzPushLeaseRevocationRecord _record({
   nextAttemptAt: clock.seconds,
 );
 
-BuzzPushEndpointGrant _grant({required int expiresAt}) => BuzzPushEndpointGrant(
+BuzzPushEndpointGrant _grant({
+  required int expiresAt,
+  String? relayPubkey,
+  int generation = 1,
+}) => BuzzPushEndpointGrant(
+  gatewayInstallationHandle: '22222222-2222-4222-8222-222222222222',
+  appAttestKeyId: 'installed-app-attest-key',
   relayOrigin: 'wss://relay.example',
-  relayPubkey: 'a' * 64,
+  relayPubkey: relayPubkey ?? 'a' * 64,
   installationId: '0' * 32,
   endpointGrant: 'opaque',
   endpointHash: 'b' * 64,
   endpointEpoch: 1,
-  generation: 1,
+  generation: generation,
   expiresAt: expiresAt,
 );
 

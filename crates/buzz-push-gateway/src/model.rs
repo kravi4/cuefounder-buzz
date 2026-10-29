@@ -18,8 +18,7 @@ pub const WIRE_VERSION: u8 = 1;
 
 /// Relay request. It deliberately has no application-payload field:
 /// the gateway emits one compiled-in APNs reconnect payload for every delivery.
-/// `endpoint_grant` is opaque authenticated ciphertext minted by the gateway
-/// sealing key and persisted with the relay-owned lease.
+/// `endpoint_grant` is an opaque random capability persisted with the relay-owned lease.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeliveryRequest {
@@ -29,9 +28,8 @@ pub struct DeliveryRequest {
     pub expires_at: i64,
 }
 
-/// Opaque delivery capability plaintext. It contains no APNs token: the random
-/// delegation id resolves through durable authority state, while the remaining
-/// fields are authenticated fences that make stale or cross-relay use fail.
+/// Legacy encrypted capability plaintext, retained for the bounded transition.
+/// New random grants resolve through their full digest in authority state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointGrant {
@@ -83,10 +81,18 @@ pub struct InstallationEnrollResponse {
 #[serde(deny_unknown_fields)]
 pub struct DelegationRequest {
     pub v: u8,
+    #[serde(default)]
     pub challenge_id: uuid::Uuid,
+    #[serde(default)]
     pub challenge: String,
+    #[serde(default)]
+    pub gateway_origin: String,
+    #[serde(default)]
+    pub request_expires_at: i64,
     pub installation_handle: uuid::Uuid,
     pub endpoint_epoch: i64,
+    #[serde(default)]
+    pub expected_generation: Option<i64>,
     pub generation: i64,
     pub relay_pubkey: String,
     pub not_before: i64,
@@ -103,8 +109,14 @@ pub struct DelegationResponse {
 #[serde(deny_unknown_fields)]
 pub struct RotateEndpointRequest {
     pub v: u8,
+    #[serde(default)]
     pub challenge_id: uuid::Uuid,
+    #[serde(default)]
     pub challenge: String,
+    #[serde(default)]
+    pub gateway_origin: String,
+    #[serde(default)]
+    pub request_expires_at: i64,
     pub installation_handle: uuid::Uuid,
     pub endpoint_epoch: i64,
     pub new_endpoint_epoch: i64,
@@ -116,8 +128,14 @@ pub struct RotateEndpointRequest {
 #[serde(deny_unknown_fields)]
 pub struct RevokeDelegationRequest {
     pub v: u8,
+    #[serde(default)]
     pub challenge_id: uuid::Uuid,
+    #[serde(default)]
     pub challenge: String,
+    #[serde(default)]
+    pub gateway_origin: String,
+    #[serde(default)]
+    pub request_expires_at: i64,
     pub installation_handle: uuid::Uuid,
     pub relay_pubkey: String,
     pub generation: i64,
@@ -128,8 +146,14 @@ pub struct RevokeDelegationRequest {
 #[serde(deny_unknown_fields)]
 pub struct RevokeInstallationRequest {
     pub v: u8,
+    #[serde(default)]
     pub challenge_id: uuid::Uuid,
+    #[serde(default)]
     pub challenge: String,
+    #[serde(default)]
+    pub gateway_origin: String,
+    #[serde(default)]
+    pub request_expires_at: i64,
     pub installation_handle: uuid::Uuid,
     pub endpoint_epoch: i64,
     pub new_endpoint_epoch: i64,

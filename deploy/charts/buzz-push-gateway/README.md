@@ -1,5 +1,16 @@
 # Buzz push gateway chart
 
+## 0.5.0 release
+
+Deploy this reader release with `issueOpaqueGrants=false` first. After every
+replica reads opaque grants, enable it and set a shared `legacyGrantsUntil` Unix
+deadline while legacy keys remain. `gatewayOrigin` binds v2 management assertions
+as well as the optional HTTPRoute; empty defaults to `https://push.buzz.xyz`.
+Remove the legacy grant-key Secret entry only after retirement, keeping opaque
+issuance enabled. APNs token storage keys remain required. Follow the staged
+rollout and storage re-encryption procedure in
+[the deployment guide](../../../docs/push-gateway-deployment.md).
+
 ## 0.4.0 release
 
 This release configures one Apple application per gateway through `application`,

@@ -12,6 +12,10 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
   public let endpoint: String
   /// Lowercase SHA-256 digest of the binary APNs device token.
   public let endpointHash: String
+  /// Endpoint epoch being enrolled or restored; absent on version 1 journals.
+  public let endpointEpoch: Int64?
+  /// Prior epoch when the journal includes an authenticated endpoint rotation.
+  public let rotationFromEpoch: Int64?
   /// Unix expiration time of the installation or delegation authority.
   public let expiresAt: Int64
   /// Unlinkable per-relay lease address, distinct from the gateway handle.
@@ -28,6 +32,8 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
   public let attestation: String?
   /// Highest delegation generation reserved before a network request.
   public let delegationGeneration: Int64
+  /// Last authoritative generation returned by a stale-generation conflict.
+  public let expectedDelegationGeneration: Int64?
   /// Unix time the journaled installation request was prepared, or its latest
   /// replacement attempt began; nil when there is none or the journal predates
   /// this field.
@@ -44,6 +50,8 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
     relayPubkey: String,
     endpoint: String,
     endpointHash: String,
+    endpointEpoch: Int64? = nil,
+    rotationFromEpoch: Int64? = nil,
     expiresAt: Int64,
     installationId: String,
     gatewayInstallationHandle: String? = nil,
@@ -52,6 +60,7 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
     keyId: String? = nil,
     attestation: String? = nil,
     delegationGeneration: Int64 = 0,
+    expectedDelegationGeneration: Int64? = nil,
     preparedAt: Int64? = nil,
     rejectedReplacements: Int? = nil
   ) {
@@ -60,6 +69,8 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
     self.relayPubkey = relayPubkey
     self.endpoint = endpoint
     self.endpointHash = endpointHash
+    self.endpointEpoch = endpointEpoch
+    self.rotationFromEpoch = rotationFromEpoch
     self.expiresAt = expiresAt
     self.installationId = installationId
     self.gatewayInstallationHandle = gatewayInstallationHandle
@@ -68,6 +79,7 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
     self.keyId = keyId
     self.attestation = attestation
     self.delegationGeneration = delegationGeneration
+    self.expectedDelegationGeneration = expectedDelegationGeneration
     self.preparedAt = preparedAt
     self.rejectedReplacements = rejectedReplacements
   }
