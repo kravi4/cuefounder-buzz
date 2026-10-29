@@ -526,7 +526,7 @@ impl LockedMemberSnapshot {
     }
 }
 
-/// Refuse to serve until migration 0074 has retired the 0032 roster trigger.
+/// Refuse to serve until migration 0076 has retired the 0032 roster trigger.
 ///
 /// This relay shows the computed `member`/`bot` label in kind:39002 rosters.
 /// The 0032 trigger compares roster labels with the stored role exactly, so
@@ -545,7 +545,7 @@ pub async fn verify_channel_roster_trigger_retired<'e>(
     .await?;
     if installed {
         return Err(DbError::InvalidData(
-            "the 0032 channel roster trigger is still installed; apply migration 0074".into(),
+            "the 0032 channel roster trigger is still installed; apply migration 0076".into(),
         ));
     }
     Ok(())
@@ -2114,7 +2114,7 @@ pub async fn get_member_role(
 }
 
 impl Db {
-    /// Fail unless migration 0074 has retired the 0032 roster trigger. See
+    /// Fail unless migration 0076 has retired the 0032 roster trigger. See
     /// [`verify_channel_roster_trigger_retired`].
     #[datastore_span(name = "verify_channel_roster_trigger_retired", system = "postgresql")]
     pub async fn verify_channel_roster_trigger_retired(&self) -> Result<()> {
@@ -5210,14 +5210,14 @@ mod postgres_tests {
         .expect("create channel");
     }
 
-    /// Migration 0074 retires the 0032 roster trigger: after migrating, the
+    /// Migration 0076 retires the 0032 roster trigger: after migrating, the
     /// database accepts a raw kind:39002 insert that disagrees with
     /// membership, because only the app-side check guards rosters now. The
     /// startup check refuses a database where the trigger is still
-    /// installed and accepts it after 0074.
+    /// installed and accepts it after 0076.
     ///
-    /// Mutations: remove the DROP statements from 0074 → the trigger refuses
-    /// the insert → RED; make the startup check always pass → the pre-0074
+    /// Mutations: remove the DROP statements from 0076 → the trigger refuses
+    /// the insert → RED; make the startup check always pass → the pre-0076
     /// database is accepted → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
@@ -5228,29 +5228,29 @@ mod postgres_tests {
             .await
             .expect("connect admin");
         let (pool, scratch_name) =
-            create_scratch_db_through(&admin, "roster_fence_retired", Some(73)).await;
+            create_scratch_db_through(&admin, "roster_fence_retired", Some(75)).await;
         let db = Db::from_pool(pool.clone());
         let error = db
             .verify_channel_roster_trigger_retired()
             .await
-            .expect_err("before 0074 the trigger is installed");
+            .expect_err("before 0076 the trigger is installed");
         assert!(
-            error.to_string().contains("apply migration 0074"),
+            error.to_string().contains("apply migration 0076"),
             "the startup check must name the missing migration: {error}"
         );
         migration::run_migrations(&pool)
             .await
-            .expect("apply migration 0074");
+            .expect("apply migration 0076");
         db.verify_channel_roster_trigger_retired()
             .await
-            .expect("0074 retires the trigger");
+            .expect("0076 retires the trigger");
         let function: Option<String> = sqlx::query_scalar(
             "SELECT to_regprocedure('public.guard_channel_roster_snapshot()')::text",
         )
         .fetch_one(&pool)
         .await
         .expect("look up the roster function");
-        assert_eq!(function, None, "0074 must drop the roster function");
+        assert_eq!(function, None, "0076 must drop the roster function");
 
         let community_uuid = Uuid::new_v4();
         let channel = Uuid::new_v4();

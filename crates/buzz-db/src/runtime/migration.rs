@@ -1343,7 +1343,7 @@ mod postgres_tests {
         assert!(roster_fence.contains("snapshot_members IS DISTINCT FROM canonical_members"));
         assert!(roster_fence.contains("ERRCODE = '23514'"));
 
-        // Migration 0074 retires this fence; the desired state never installs it.
+        // Migration 0076 retires this fence; the desired state never installs it.
         assert!(!desired_schema.contains("guard_channel_roster_snapshot"));
 
         // The single-row heartbeat table is updated continuously. Prevent

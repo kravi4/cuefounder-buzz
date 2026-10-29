@@ -75,7 +75,7 @@ pub enum StartupStep {
     MeshInitialReconcile,
     /// Run the git object-store conformance probe (when enabled).
     GitConformanceProbe,
-    /// Verify that migration 0074 retired the 0032 roster trigger.
+    /// Verify that migration 0076 retired the 0032 roster trigger.
     ChannelRosterTriggerRetired,
     /// Repair large NIP-29 channel roster snapshots.
     LargeRosterReconcile,
