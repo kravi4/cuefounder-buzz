@@ -24,6 +24,7 @@
 | `BUZZ_PUSH_TOKEN_KEYS` | Independent token-custody AEAD keyring in the same format. Never reuse grant keys. |
 | `BUZZ_PUSH_ISSUE_OPAQUE_GRANTS` | Defaults to `false` for reader-first rollout; enable only after every replica reads opaque grants. |
 | `BUZZ_PUSH_LEGACY_GRANTS_UNTIL` | Unix acceptance deadline for legacy grants/management. Required when opaque issuance is enabled while legacy keys remain; at most the configured maximum grant lifetime plus 300 seconds ahead. |
+| `BUZZ_PUSH_TRUSTED_PROXY_CIDRS` | Optional comma-separated TCP peer IPs/CIDRs allowed to set `X-Buzz-Client-IP`; at most 64 entries. Empty, malformed and `/0` ranges fail startup. Omit for direct clients. |
 
 Each gateway serves one configured Apple application. App Attest validates
 `application.appAttestAppId` (`TEAMID.bundle-id`) before enrollment. APNs uses
@@ -37,11 +38,24 @@ Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SE
 
 Enrollment, management, revocation and delivery have separate bounded concurrency
 and source-rate lanes. Public enrollment or invalid grants cannot occupy reserved
-revocation slots. Source identity is the TCP peer, never `Forwarded` or
-`X-Forwarded-For`; preserve source addresses at ingress where possible. A proxy
-that hides sources shares one source budget. Source bookkeeping is capped at
-4096 entries per lane; the database pool has 20 connections with admission lanes
-using at most 18 concurrently.
+revocation slots. Direct clients use TCP peer identity regardless of supplied
+headers. Behind a TLS ingress or HTTPRoute proxy, set chart `trustedProxyCidrs`
+to the actual proxy peer IPs/narrow CIDRs (for example `["10.42.8.0/24"]`). The
+proxy must strip every incoming `X-Buzz-Client-IP` and overwrite it with exactly
+one verified client IP, without ports, brackets or a list. For a first-hop NGINX
+proxy, the upstream location uses `proxy_set_header X-Buzz-Client-IP $remote_addr;`.
+Never derive it from an untrusted `Forwarded` or `X-Forwarded-For`. A proxy behind
+another proxy must first authenticate that upstream's client-address metadata.
+Configure this on the actual ingress/controller; HTTPRoute alone cannot set a
+dynamic client-IP header. Restrict pod ingress to those proxies using the chart's
+`networkPolicy.enabled=false` and `externalPolicyName` replacement policy (policies
+combine allowances), and do not trust a CIDR containing untrusted workloads.
+
+Trusted peers with missing, duplicate or malformed metadata receive 429 before
+work admission; they never fall back to a shared proxy budget. Verify that two
+external clients retain separate limits through the deployed route before
+enabling traffic. Source bookkeeping is capped at 4096 entries per lane; the
+database pool has 20 connections with admission lanes using at most 18 concurrently.
 
 ## Personal device development
 
@@ -262,6 +276,8 @@ renewal/revocation with both versions. After the deadline remove legacy grant
 keys, retaining `issueOpaqueGrants=true`. New grants need no encryption keys;
 APNs token storage keys remain required. Legacy retirement never deletes
 assertion counters, permission versions or revocation tombstones.
+With opaque issuance, omitting the legacy deadline disables v1 management;
+only an explicit future deadline permits that temporary compatibility path.
 
 Revocation prevents new delivery admission; it cannot recall a push already
 admitted or accepted by APNs.

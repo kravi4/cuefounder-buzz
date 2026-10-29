@@ -23,6 +23,9 @@ migration:
 # Deployment origin bound into v2 management assertions; empty uses push.buzz.xyz.
 # Also supplies the hostname when httpRoute.enabled=true.
 gatewayOrigin: ""
+# TCP peer IPs/CIDRs allowed to overwrite X-Buzz-Client-IP. See deployment guide.
+# Leave empty only for direct client connections; never trust the public network.
+trustedProxyCidrs: []
 maxGrantLifetimeSeconds: 2592000
 # Read support must reach every replica before enabling issuance.
 issueOpaqueGrants: false

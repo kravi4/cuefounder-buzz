@@ -131,6 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             issue_opaque_grants: c.issue_opaque_grants,
             legacy_grants_until: c.legacy_grants_until,
             gateway_origin: c.gateway_origin.clone(),
+            trusted_proxy_cidrs: c.trusted_proxy_cidrs.clone(),
             max_installation_lifetime_seconds: c.max_installation_lifetime_seconds,
             endpoint_quota_window_seconds: c.endpoint_quota_window_seconds,
             endpoint_quota_max_deliveries: c.endpoint_quota_max_deliveries,

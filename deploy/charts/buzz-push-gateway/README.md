@@ -11,6 +11,12 @@ issuance enabled. APNs token storage keys remain required. Follow the staged
 rollout and storage re-encryption procedure in
 [the deployment guide](../../../docs/push-gateway-deployment.md).
 
+Behind an ingress/HTTPRoute proxy, configure `trustedProxyCidrs` with its narrow
+TCP peer ranges and make that controller strip/overwrite `X-Buzz-Client-IP` with
+one verified client address. Untrusted peers cannot select their source budget;
+trusted peers missing valid metadata are rejected. See the deployment guide for
+the required controller and network-policy setup.
+
 ## 0.4.0 release
 
 This release configures one Apple application per gateway through `application`,

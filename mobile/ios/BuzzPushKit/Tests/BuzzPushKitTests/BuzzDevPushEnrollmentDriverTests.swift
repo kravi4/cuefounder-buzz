@@ -1264,6 +1264,60 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     XCTAssertEqual(store.saved.count, 2)
   }
 
+  func testLegacyInstallationsRenewUsingCurrentTokenOwnerInsteadOfRotatingOldOwner() async throws {
+    let token = Data((1...32).map(UInt8.init))
+    let endpointHash = Self.hex(SHA256.hash(data: token))
+    let currentHandle = "44444444-4444-4444-8444-444444444444"
+    let currentKeyId = Data(repeating: 0xBB, count: 32).base64EncodedString()
+    for oldEpoch in [Int64(1), Int64(3)] {
+      let old = BuzzPushEndpointGrantRecord(
+        gatewayOrigin: Self.gatewayOrigin, relayOrigin: "wss://relay.example",
+        relayPubkey: Self.relayPubkey, gatewayInstallationHandle: Self.installationHandle,
+        appAttestKeyId: Self.keyId, installationId: Self.installationId,
+        endpointGrant: "old-token-grant", endpointHash: "old-token-hash",
+        endpointEpoch: oldEpoch, generation: 7, expiresAt: Self.expiresAt)
+      let current = BuzzPushEndpointGrantRecord(
+        gatewayOrigin: Self.gatewayOrigin, relayOrigin: "wss://other.example",
+        relayPubkey: String(repeating: "b", count: 64), gatewayInstallationHandle: currentHandle,
+        appAttestKeyId: currentKeyId, installationId: String(repeating: "f", count: 32),
+        endpointGrant: "current-token-grant", endpointHash: endpointHash,
+        endpointEpoch: 1, generation: 1, expiresAt: Self.expiresAt)
+      let store = MemoryGrantStore(records: [old, current])
+      let appAttest = RecordingAppAttest()
+      let driver = try makeDriver(store: store, appAttest: appAttest)
+      URLProtocolStub.handler = { request in
+        switch (request.httpMethod, request.url?.path) {
+        case ("GET", "/"):
+          return Self.response(request, status: 200,
+            json: ["push": ["keys": [["pubkey": Self.relayPubkey, "current": true]]]])
+        case ("POST", "/v1/delegations"):
+          let body = try Self.body(request)
+          XCTAssertEqual(body["installation_handle"] as? String, currentHandle)
+          XCTAssertEqual(body["endpoint_epoch"] as? Int, 1)
+          XCTAssertEqual(body["expected_generation"] as? Int, 0)
+          XCTAssertEqual(body["generation"] as? Int, 1)
+          XCTAssertEqual(store.pending.first?.gatewayInstallationHandle, currentHandle)
+          XCTAssertNil(store.pending.first?.rotationFromEpoch)
+          return Self.response(request, status: 201, json: ["endpoint_grant": "renewed-grant"])
+        default:
+          XCTFail("The current token already has an installation; must only delegate, not rotate or enroll")
+          return Self.response(request, status: 409, json: ["error": "endpoint_in_use"])
+        }
+      }
+
+      let record = try await driver.enroll(deviceToken: token, relayURL: Self.relayURL)
+
+      XCTAssertEqual(record.gatewayInstallationHandle, currentHandle)
+      XCTAssertEqual(record.installationId, old.installationId)
+      XCTAssertEqual(record.endpointEpoch, 1)
+      XCTAssertEqual(record.endpointHash, endpointHash)
+      XCTAssertEqual(record.endpointGrant, "renewed-grant")
+      XCTAssertEqual(appAttest.assertionKeyIds, [currentKeyId])
+      XCTAssertTrue(store.pending.isEmpty)
+      XCTAssertTrue(store.saved.contains(current))
+    }
+  }
+
   func testExpiringGrantRenewsExistingInstallationAndReusesRelayLeaseAddress() async throws {
     let existing = BuzzPushEndpointGrantRecord(
       gatewayOrigin: Self.gatewayOrigin,

@@ -719,7 +719,7 @@ final buzzPushLeaseRevocationOutboxProvider =
                 ref.read(communityListProvider).value ??
                 await ref.read(communityStorageProvider).loadAll();
             // Recheck at execution: another community may have opted in since
-            // this cleanup was journaled. Unknown grants retain shared authority.
+            // this cleanup was journaled. Only a known signer shares authority.
             revokeGateway =
                 originalTarget['relayPubkey'] == '' ||
                 !communities
@@ -730,12 +730,10 @@ final buzzPushLeaseRevocationOutboxProvider =
                             grant.relayOrigin ==
                             canonicalBuzzPushRelayOrigin(community.relayUrl),
                       );
-                      return matching.isEmpty ||
-                          matching.any(
-                            (grant) =>
-                                grant.relayPubkey ==
-                                originalTarget['relayPubkey'],
-                          );
+                      return matching.any(
+                        (grant) =>
+                            grant.relayPubkey == originalTarget['relayPubkey'],
+                      );
                     });
           }
           await publishBuzzPushLeaseRevocation(

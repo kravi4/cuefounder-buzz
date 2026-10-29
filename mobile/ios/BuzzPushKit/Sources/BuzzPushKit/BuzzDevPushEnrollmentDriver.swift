@@ -620,7 +620,12 @@ public final class BuzzDevPushEnrollmentDriver {
         let uuid = UUID(uuidString: handle)
       else { return false }
       return handle == uuid.uuidString.lowercased()
-    }.max { $0.endpointEpoch < $1.endpointEpoch }
+    }.max {
+      // Legacy clients could retain separate installations after token changes.
+      let currentEndpoint = $0.endpointHash == endpointHash
+      if currentEndpoint != ($1.endpointHash == endpointHash) { return !currentEndpoint }
+      return $0.endpointEpoch < $1.endpointEpoch
+    }
 
     let (renewedExpiration, expiresOverflow) = nowSeconds.addingReportingOverflow(lifetimeSeconds)
     guard !expiresOverflow else {

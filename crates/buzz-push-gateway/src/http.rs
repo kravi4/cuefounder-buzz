@@ -47,6 +47,8 @@ pub struct ApplicationRuntime {
 pub struct AppState {
     pub grant_keyring: Arc<GrantKeyring>,
     pub issue_opaque_grants: bool,
+    /// Only these TCP peers may supply the client-address header.
+    pub trusted_proxy_cidrs: Vec<(std::net::IpAddr, u8)>,
     pub legacy_grants_until: Option<i64>,
     pub gateway_origin: String,
     pub authority: Arc<dyn AuthorityStore>,
@@ -351,7 +353,10 @@ async fn verify_installation_assertion<T: serde::Serialize>(
         {
             return Err(error(StatusCode::BAD_REQUEST, "invalid_request"));
         }
-    } else if request.v != 1 || s.legacy_grants_until.is_some_and(|end| now >= end) {
+    } else if request.v != 1
+        || s.legacy_grants_until.is_some_and(|end| now >= end)
+        || (s.issue_opaque_grants && s.legacy_grants_until.is_none())
+    {
         return Err(error(StatusCode::BAD_REQUEST, "unsupported_version"));
     }
     let installation = if include_revoked {
@@ -967,10 +972,10 @@ pub fn router_with_metrics(
 ) -> (Router, Router) {
     // At most 18 requests hold database work, leaving the 20-connection pool
     // headroom. No common semaphore lets delivery/enrollment use revocation slots.
-    let enrollment_lane = crate::ingress::Lane::new(2, 20);
-    let management_lane = crate::ingress::Lane::new(4, 120);
-    let revocation_lane = crate::ingress::Lane::new(4, 120);
-    let delivery_lane = crate::ingress::Lane::new(8, 1200);
+    let enrollment_lane = crate::ingress::Lane::new(2, 20, state.trusted_proxy_cidrs.clone());
+    let management_lane = crate::ingress::Lane::new(4, 120, state.trusted_proxy_cidrs.clone());
+    let revocation_lane = crate::ingress::Lane::new(4, 120, state.trusted_proxy_cidrs.clone());
+    let delivery_lane = crate::ingress::Lane::new(8, 1200, state.trusted_proxy_cidrs.clone());
     let enrollment = Router::new()
         .route(
             "/v1/installations",
@@ -1071,6 +1076,7 @@ mod request_limit_tests {
         .expect("pinned Apple root fixture");
         AppState {
             issue_opaque_grants: false,
+            trusted_proxy_cidrs: Vec::new(),
             legacy_grants_until: None,
             gateway_origin: "https://push.buzz.xyz".into(),
             grant_keyring: Arc::new(
@@ -1140,6 +1146,29 @@ mod request_limit_tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn proxy_revocation_flood_does_not_spend_another_clients_source_budget() {
+        let mut state = state();
+        state.trusted_proxy_cidrs = vec![("10.0.0.0".parse().unwrap(), 24)];
+        let (public, _) = router(state);
+        let mut cases = vec![("192.0.2.1", StatusCode::BAD_REQUEST); 120];
+        cases.extend([
+            ("192.0.2.1", StatusCode::TOO_MANY_REQUESTS),
+            ("192.0.2.2", StatusCode::BAD_REQUEST),
+        ]);
+        for (client, expected) in cases {
+            let mut request = Request::post("/v1/delegations/revoke")
+                .header("x-buzz-client-ip", client)
+                .body(Body::from("{}"))
+                .unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                "10.0.0.1:1234".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            let response = public.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), expected);
+        }
     }
 
     #[test]

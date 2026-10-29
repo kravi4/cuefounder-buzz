@@ -103,6 +103,7 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
         issue_opaque_grants: false,
         legacy_grants_until: None,
         gateway_origin: "https://push.buzz.xyz".into(),
+        trusted_proxy_cidrs: Vec::new(),
         authority,
         token_keyring,
         application: Arc::new(ApplicationRuntime {

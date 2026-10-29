@@ -11,7 +11,8 @@ helm template push "$chart" \
 helm template push "$chart" --set networkPolicy.enabled=false \
   --set networkPolicy.externalPolicyName=platform-runtime >"$out/external.yaml"
 helm template push "$chart" --set issueOpaqueGrants=true --set legacyGrantsUntil=2000000000 \
-  --set gatewayOrigin=https://push.example >"$out/protocol.yaml"
+  --set gatewayOrigin=https://push.example \
+  --set-json 'trustedProxyCidrs=["10.42.8.0/24","2001:db8::/64"]' >"$out/protocol.yaml"
 env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby -ryaml - "$out" <<'RUBY'
 base, runtime, external = %w[default runtime external].map { |name| YAML.load_stream(File.read("#{ARGV[0]}/#{name}.yaml")).compact }
 pod = runtime.find { |r| r['kind'] == 'Deployment' }.dig('spec', 'template')
@@ -28,6 +29,9 @@ env = protocol.dig('spec', 'template', 'spec', 'containers', 0, 'env').to_h { |e
 raise 'opaque issuance flag missing' unless env['BUZZ_PUSH_ISSUE_OPAQUE_GRANTS']['value'] == 'true'
 raise 'legacy deadline must be decimal' unless env['BUZZ_PUSH_LEGACY_GRANTS_UNTIL']['value'] == '2000000000'
 raise 'management origin missing' unless env['BUZZ_PUSH_GATEWAY_ORIGIN']['value'] == 'https://push.example'
+raise 'trusted proxy ranges missing' unless env['BUZZ_PUSH_TRUSTED_PROXY_CIDRS']['value'] == '10.42.8.0/24,2001:db8::/64'
+default_env = base.find { |r| r['kind'] == 'Deployment' }.dig('spec', 'template', 'spec', 'containers', 0, 'env')
+raise 'default must not trust proxy headers' if default_env.any? { |entry| entry['name'] == 'BUZZ_PUSH_TRUSTED_PROXY_CIDRS' }
 raise 'retired legacy keys must be optional' unless env.dig('BUZZ_PUSH_GRANT_KEYS', 'valueFrom', 'secretKeyRef', 'optional') == true
 RUBY
 reject() {
@@ -45,6 +49,9 @@ reject --set networkPolicy.enabled=false --set-string 'networkPolicy.externalPol
 reject --set networkPolicy.externalPolicyName=conflicting-policy
 reject --set terminationGracePeriodSeconds=59
 reject --set podLabels.invalid=true
+reject --set-json 'trustedProxyCidrs=[""]'
+reject --set-json 'trustedProxyCidrs=["10.0.0.1","10.0.0.1"]'
+reject --set-json 'trustedProxyCidrs=[123]'
 for label in name instance component; do
   reject --set-string "podLabels.app\\.kubernetes\\.io/$label=override"
 done

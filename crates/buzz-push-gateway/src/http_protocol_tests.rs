@@ -106,6 +106,48 @@ async fn delegate_request(
     )
     .await
 }
+async fn legacy_delegate_request(
+    app: &Router,
+    authority: &PostgresAuthorityStore,
+    id: Uuid,
+    relay: &str,
+    generation: i64,
+    counter: u32,
+) -> (StatusCode, serde_json::Value) {
+    let challenge_id = Uuid::new_v4();
+    authority
+        .put_challenge(Challenge {
+            id: challenge_id,
+            value: [9; 32],
+            created_at: now(),
+            expires_at: now() + 300,
+        })
+        .await
+        .unwrap();
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9; 32]);
+    let t = DelegateTranscript {
+        v: 1,
+        audience: DELEGATE_AUDIENCE,
+        gateway_origin: None,
+        request_expires_at: None,
+        challenge_id: Some(challenge_id),
+        challenge: Some(&challenge),
+        installation_handle: id,
+        endpoint_epoch: 1,
+        expected_generation: None,
+        generation,
+        relay_pubkey: relay,
+        not_before: now(),
+        expires_at: now() + 600,
+    };
+    post(
+        app,
+        "/v1/delegations",
+        serde_json::to_value(&t).unwrap(),
+        Some((&transcript("buzz.push.delegate.v1", &t).unwrap(), counter)),
+    )
+    .await
+}
 async fn revoke(app: &Router, id: Uuid, relay: &str, generation: i64, counter: u32) -> StatusCode {
     let t = RevokeDelegationTranscript {
         v: 2,
@@ -223,10 +265,11 @@ async fn opaque_http_flow_is_atomic_fair_retryable_and_revocable_under_enrollmen
         )
         .await
         .unwrap();
-    let (app, _) = router(AppState {
+    let state = AppState {
         grant_keyring: Arc::new(GrantKeyring::new(vec![]).unwrap()),
         issue_opaque_grants: true,
-        legacy_grants_until: Some(now() + 600),
+        legacy_grants_until: None,
+        trusted_proxy_cidrs: Vec::new(),
         gateway_origin: ORIGIN.into(),
         authority: authority.clone(),
         token_keyring: Arc::new(tokens),
@@ -246,7 +289,14 @@ async fn opaque_http_flow_is_atomic_fair_retryable_and_revocable_under_enrollmen
         endpoint_quota_max_deliveries: 8,
         now,
         accepting: Arc::new(AtomicBool::new(true)),
-    });
+    };
+    let (app, _) = router(state.clone());
+    let legacy_relay = nostr::Keys::generate().public_key().to_hex();
+    let (status, rejected) =
+        legacy_delegate_request(&app, &authority, id, &legacy_relay, 1, 1).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    assert_eq!(rejected["error"], "unsupported_version");
+    // Steady-state v2 succeeds with the same counter: v1 rejection mutated nothing.
     let (status, issued) = delegate_request(&app, id, &relay, 0, 1, 1).await;
     assert_eq!(status, StatusCode::CREATED, "{issued}");
     let grant = issued["endpoint_grant"].as_str().unwrap();
@@ -452,6 +502,51 @@ async fn opaque_http_flow_is_atomic_fair_retryable_and_revocable_under_enrollmen
         StatusCode::TOO_MANY_REQUESTS
     );
     assert_eq!(revoke(&app, id, &other_relay, 1, 10).await, StatusCode::OK);
+    // Reader-first deployments still accept v1. Opaque issuers require an
+    // explicit future deadline; reaching it rejects without advancing counters.
+    for (opaque, deadline, generation, counter, expected) in [
+        (false, None, 1, 11, StatusCode::CREATED),
+        (true, Some(now() + 600), 2, 12, StatusCode::CREATED),
+        (true, Some(now()), 3, 13, StatusCode::BAD_REQUEST),
+        (false, Some(now()), 3, 13, StatusCode::BAD_REQUEST),
+    ] {
+        let mut compatible = state.clone();
+        compatible.issue_opaque_grants = opaque;
+        compatible.legacy_grants_until = deadline;
+        compatible.grant_keyring = Arc::new(
+            GrantKeyring::new(vec![
+                crate::grant::GrantKey::new("legacy", &[8; 32]).unwrap()
+            ])
+            .unwrap(),
+        );
+        let (compatible, _) = router(compatible);
+        let (status, body) = legacy_delegate_request(
+            &compatible,
+            &authority,
+            id,
+            &legacy_relay,
+            generation,
+            counter,
+        )
+        .await;
+        assert_eq!(status, expected, "{body}");
+        if expected == StatusCode::CREATED {
+            assert_eq!(
+                body["endpoint_grant"].as_str().unwrap().starts_with("g2_"),
+                opaque
+            );
+        } else {
+            assert_eq!(body["error"], "unsupported_version");
+        }
+    }
+    assert_eq!(
+        authority
+            .installation(id, now())
+            .await
+            .unwrap()
+            .assertion_counter,
+        12
+    );
     pool.close().await;
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(&admin)
