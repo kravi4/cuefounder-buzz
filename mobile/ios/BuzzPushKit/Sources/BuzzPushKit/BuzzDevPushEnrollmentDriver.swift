@@ -436,14 +436,18 @@ public final class BuzzDevPushEnrollmentDriver {
           && $0.endpointEpoch > (pending.endpointEpoch ?? Self.endpointEpoch)
       }
       if pending.expiresAt <= Int64(now().timeIntervalSince1970) || superseded {
+        try await retireReplacedDelegation(relayOrigin: pending.relayOrigin,
+          installationHandle: pending.gatewayInstallationHandle, relayPubkey: pending.relayPubkey)
         try store.removePendingEnrollment(gatewayOrigin: gatewayOrigin, relayOrigin: pending.relayOrigin)
       } else {
         do {
           _ = try await completeEnrollment(pending, storedRecords: store.records(), relayMetadataPubkey: nil)
         } catch let error as BuzzDevPushEnrollmentError {
-          // The enrollment endpoint checks exact committed authority before
-          // challenge consumption. A replay 404 therefore has nothing to revoke.
+          // A 404 rules out the journaled installation, not prior authority
+          // still retained for this origin.
           guard case .unexpectedStatus(route: "v1/installations", _, 404, _) = error else { throw error }
+          try await retireReplacedDelegation(relayOrigin: pending.relayOrigin,
+            installationHandle: pending.gatewayInstallationHandle, relayPubkey: pending.relayPubkey)
           try store.removePendingEnrollment(gatewayOrigin: gatewayOrigin, relayOrigin: pending.relayOrigin)
         }
       }
@@ -575,6 +579,8 @@ public final class BuzzDevPushEnrollmentDriver {
     {
       // A sibling already advanced this installation. Every request in the old
       // journal is fenced by its endpoint epoch and cannot restore authority.
+      try await retireReplacedDelegation(relayOrigin: pending.relayOrigin,
+        installationHandle: pending.gatewayInstallationHandle, relayPubkey: pending.relayPubkey)
       try store.removePendingEnrollment(gatewayOrigin: gatewayOrigin, relayOrigin: relayOrigin.text)
       return try await enroll(deviceToken: deviceToken, relayURL: relayURL, replacing: nil)
     }
@@ -598,6 +604,8 @@ public final class BuzzDevPushEnrollmentDriver {
           )
         }
       } else {
+        try await retireReplacedDelegation(relayOrigin: pending.relayOrigin,
+          installationHandle: pending.gatewayInstallationHandle, relayPubkey: pending.relayPubkey)
         try store.removePendingEnrollment(
           gatewayOrigin: gatewayOrigin,
           relayOrigin: relayOrigin.text
@@ -626,7 +634,8 @@ public final class BuzzDevPushEnrollmentDriver {
         generation: reusableGrant.generation,
         expiresAt: reusableGrant.expiresAt
       )
-      try await retireReplacedDelegation(record)
+      try await retireReplacedDelegation(relayOrigin: record.relayOrigin,
+        installationHandle: record.gatewayInstallationHandle, relayPubkey: record.relayPubkey)
       try store.save(record)
       try store.removePendingEnrollment(
         gatewayOrigin: gatewayOrigin,
@@ -1031,7 +1040,8 @@ public final class BuzzDevPushEnrollmentDriver {
       generation: generation,
       expiresAt: pending.expiresAt
     )
-    try await retireReplacedDelegation(record)
+    try await retireReplacedDelegation(relayOrigin: record.relayOrigin,
+      installationHandle: record.gatewayInstallationHandle, relayPubkey: record.relayPubkey)
     try store.save(record)
     try store.removePendingEnrollment(
       gatewayOrigin: gatewayOrigin,
@@ -1040,12 +1050,13 @@ public final class BuzzDevPushEnrollmentDriver {
     return record
   }
 
-  private func retireReplacedDelegation(_ replacement: BuzzPushEndpointGrantRecord) async throws {
+  private func retireReplacedDelegation(
+    relayOrigin: String, installationHandle: String?, relayPubkey: String
+  ) async throws {
     let records = try store.records()
     guard let old = records.first(where: {
-      $0.gatewayOrigin == replacement.gatewayOrigin && $0.relayOrigin == replacement.relayOrigin
-    }), old.gatewayInstallationHandle != replacement.gatewayInstallationHandle
-      || old.relayPubkey != replacement.relayPubkey,
+      $0.gatewayOrigin == gatewayOrigin && $0.relayOrigin == relayOrigin
+    }), old.gatewayInstallationHandle != installationHandle || old.relayPubkey != relayPubkey,
       let handle = old.gatewayInstallationHandle, let installation = UUID(uuidString: handle)
     else { return }
     guard !records.contains(where: {
