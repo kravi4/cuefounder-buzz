@@ -505,7 +505,9 @@ async fn apply_pgschema_to_existing_database(pool: &PgPool) {
 #[ignore = "requires Postgres"]
 async fn migration_schema_0075_adds_invite_columns_without_rewriting_history() {
     let (pool, cases) = legacy_fixture().await;
-    crate::migration::run_migrations(&pool).await.unwrap();
+    crate::migration::run_migrations_through(&pool, 75)
+        .await
+        .unwrap();
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT max(version) FROM _sqlx_migrations WHERE success")
             .fetch_one(&pool)
