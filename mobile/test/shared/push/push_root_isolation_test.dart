@@ -336,6 +336,119 @@ void main() {
   );
 
   testWidgets(
+    'inactive renewal waits for selection and follows active ownership switches',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keys = nostr.Keys.generate();
+      final communities = [
+        for (final name in ['one', 'two'])
+          Community.create(
+            name: name,
+            relayUrl: 'https://$name.example',
+            nsec: keys.nsec,
+            pubkey: keys.public,
+          ).copyWith(
+            pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+              desired: [
+                BuzzPushSubscription(
+                  filter: BuzzPushFilter(kinds: [9], pTags: [keys.public]),
+                  notificationClass: 'default',
+                ),
+              ],
+            ),
+          ),
+      ];
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      for (final community in communities) {
+        await storage.save(community);
+      }
+      final pending = Completer<Community?>();
+      Future<Community?> selection = pending.future;
+      final discoveries = <String>[];
+      const native = MethodChannel('buzz/push');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        native,
+        (call) async => switch (call.method) {
+          'endpointGrants' => [
+            for (final community in communities)
+              {
+                'relayOrigin': 'wss://${community.name}.example',
+                'relayPubkey': 'a' * 64,
+                'installationId': '0' * 32,
+                'endpointGrant': 'g2_saved',
+                'endpointHash': 'b' * 64,
+                'endpointEpoch': 1,
+                'generation': 1,
+                'expiresAt':
+                    DateTime.now().millisecondsSinceEpoch ~/ 1000 + 3600,
+              },
+          ],
+          'takePendingNotificationResponse' => null,
+          _ => throw StateError('Unexpected native call ${call.method}'),
+        },
+      );
+      addTearDown(() {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          native,
+          null,
+        );
+        apnsDeviceToken.value = null;
+        pushEndpointGrants.value = [];
+      });
+      apnsDeviceToken.value = 'token';
+      await tester.pumpWidget(
+        ProviderScope(
+          retry: (_, _) => null,
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            communityStorageProvider.overrideWithValue(storage),
+            communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+            buzzPushLeaseRevocationStorageProvider.overrideWithValue(
+              BuzzPushLeaseRevocationStorage(secure: FakeSecureStorage()),
+            ),
+            activeCommunityProvider.overrideWith((_) => selection),
+            relaySessionProvider.overrideWith(_Session.new),
+            pushSubscriptionSyncProvider.overrideWith((_) async => 0),
+            currentRelayPushDescriptorProvider.overrideWith((_) async => null),
+            buzzPushDescriptorFetcherProvider.overrideWithValue((url) async {
+              discoveries.add(url);
+              throw StateError('Stop before enrollment and network handoff.');
+            }),
+          ],
+          child: const BuzzPushBootstrap(child: SizedBox()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(discoveries, isEmpty);
+      pending.complete(null);
+      await tester.pumpAndSettle();
+      expect(discoveries, [for (final value in communities) value.relayUrl]);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(BuzzPushBootstrap)),
+      );
+      for (final active in communities) {
+        discoveries.clear();
+        selection = Future.value(active);
+        container.invalidate(activeCommunityProvider);
+        await tester.pumpAndSettle();
+        expect(discoveries, [
+          communities.firstWhere((value) => value.id != active.id).relayUrl,
+        ]);
+      }
+      // Refreshing the same selection must not restart inactive publication.
+      discoveries.clear();
+      container.invalidate(activeCommunityProvider);
+      await tester.pumpAndSettle();
+      expect(discoveries, isEmpty);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
     'opt-out fences late native generation recovery and journals cleanup',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;

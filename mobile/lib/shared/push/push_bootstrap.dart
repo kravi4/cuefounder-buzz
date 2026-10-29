@@ -424,13 +424,14 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     );
 
     final token = apnsDeviceToken.value;
+    final activeSelection = ref.watch(activeCommunityProvider);
     final nativeCleanupKey = [
       for (final grant in pushEndpointGrants.value)
         '${grant.relayOrigin}|${grant.relayPubkey}|${grant.gatewayInstallationHandle}|'
             '${grant.generation}|${grant.endpointEpoch}|${grant.endpointGrant.isEmpty}|${grant.pending}',
     ].join(';');
     final allOriginsKey =
-        '$token|$nativeCleanupKey|${[for (final value in communities) '${value.id}|${value.pushNotificationsEnabled}|'
+        '$token|$nativeCleanupKey|${activeSelection.hasValue}|${activeSelection.value?.id}|${[for (final value in communities) '${value.id}|${value.pushNotificationsEnabled}|'
               '${buzzPushSubscriptionsFingerprint(value.pushSubscriptionState.desired)}'].join(';')}';
     latestOtherOriginsAttempt.value = allOriginsKey;
     useEffect(() {
@@ -455,9 +456,14 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
           final expiresAt = token == null
               ? null
               : await renewBuzzPushCommunityLeases(
-                  readCommunities: () => context.mounted
-                      ? ref.read(communityListProvider).value ?? const []
-                      : const [],
+                  readCommunities: () {
+                    if (!context.mounted) return const [];
+                    final active = ref.read(activeCommunityProvider);
+                    if (!active.hasValue) return const [];
+                    return (ref.read(communityListProvider).value ?? const [])
+                        .where((value) => value.id != active.value?.id)
+                        .toList();
+                  },
                   grants: grants,
                   publish: (value) {
                     final member = value.pubkey ?? pubkeyFromNsec(value.nsec);
